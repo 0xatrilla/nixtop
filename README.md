@@ -1,3 +1,6 @@
+
+<img width="500" height="500" alt="Screenshot 2025-12-16 at 02 15 40" src="https://github.com/user-attachments/assets/6cdb8460-41db-4ad5-9e09-d1d69ae5cd4c" />
+
 # nixmon
 
 A system monitor for the terminal, written in pure Nix.
