@@ -134,17 +134,23 @@ rec {
       height = builtins.length content + 2;  # +2 for top and bottom borders
       
       # Format content lines
-      # For content with ANSI codes, we trust it's pre-padded correctly
-      # For plain content, we pad to innerWidth
+      # Lines may contain ANSI escape codes, making string length > visual width
+      # Strategy: Estimate visual width and pad to innerWidth
       formatLine = line:
         let
           lineLen = builtins.stringLength line;
-          # If line is longer than innerWidth, it likely has ANSI codes - don't pad
-          # If line is shorter, pad it
-          needsPadding = lineLen < innerWidth;
-          padded = if needsPadding 
-                   then line + utils.repeat (innerWidth - lineLen) " "
-                   else line;
+          # If line is longer than innerWidth, it likely has ANSI codes
+          # Estimate: fgHex (RGB) = ~20-22 chars, resetAll = ~4 chars, total ~24-26 chars for a progress bar
+          # Use 25 as a conservative estimate
+          hasAnsiCodes = lineLen > innerWidth + 10;
+          estimatedAnsiOverhead = if hasAnsiCodes then 25 else 0;
+          estimatedVisualWidth = lineLen - estimatedAnsiOverhead;
+          # Pad to ensure visual width is exactly innerWidth
+          # Be more precise: pad the exact difference needed
+          paddingNeeded = if estimatedVisualWidth < innerWidth
+                          then innerWidth - estimatedVisualWidth 
+                          else 0;
+          padded = line + utils.repeat paddingNeeded " ";
         in chars.vertical + padded + chars.vertical;
       
       # Title handling
@@ -345,13 +351,21 @@ rec {
       ansi = import ./ansi.nix { inherit pkgs utils; };
       innerWidth = width - 2;
       
-      # Format content lines (don't truncate - ANSI codes mess up length calculation)
+      # Format content lines (account for ANSI codes)
       formatLine = line:
         let
           lineLen = builtins.stringLength line;
-          paddingNeeded = innerWidth - lineLen;
-          # Only pad if we need positive padding (line contains ANSI codes = longer string)
-          padded = if paddingNeeded > 0 then line + utils.repeat paddingNeeded " " else line;
+          # Estimate visual width: if line is longer than innerWidth, it has ANSI codes
+          # Typical ANSI codes for colored content: ~25 chars
+          # (fgHex RGB color ~20-22 chars + resetAll ~4 chars)
+          hasAnsiCodes = lineLen > innerWidth + 10;
+          estimatedAnsiOverhead = if hasAnsiCodes then 25 else 0;
+          estimatedVisualWidth = lineLen - estimatedAnsiOverhead;
+          # Pad to ensure visual width is exactly innerWidth
+          paddingNeeded = if estimatedVisualWidth < innerWidth 
+                          then innerWidth - estimatedVisualWidth 
+                          else 0;
+          padded = line + utils.repeat paddingNeeded " ";
         in chars.vertical + padded + chars.vertical;
       
       # Title bar

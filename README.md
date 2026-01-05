@@ -3,43 +3,79 @@
 
 # nixmon
 
-A system monitor for the terminal, written in pure Nix.
+A system monitor for the terminal, written in pure Nix. A btop clone that demonstrates advanced Nix programming techniques.
 
 ## Features
 
-- CPU usage with per-core breakdown
-- Memory and swap monitoring
-- Disk usage for mounted filesystems
-- Network throughput with historical graphs
-- Process list sorted by resource usage
+- CPU usage with per-core breakdown and sparklines
+- Memory and swap monitoring with visual progress bars
+- Disk usage for mounted filesystems with usage percentages
+- Network throughput with historical graphs and interface statistics
+- Process list sorted by resource usage with filtering and selection
 - Temperature sensors
-- Battery status
-- Multiple color themes
+- Battery status (macOS)
+- Multiple color themes (default, nord, gruvbox, dracula, monokai, solarized)
+- Auto-resize to fill terminal window
+- Mouse support for scrolling and interaction
+- Keyboard shortcuts for navigation and control
 
 ## Requirements
 
 - Nix with flakes enabled
 - macOS or Linux
 
-## Usage
+## Installation
 
-Run directly with Nix:
+### Quick Install (Recommended)
+
+Install globally so you can run `nixmon` from anywhere, just like `btop`:
 
 ```bash
-nix run github:yourusername/nixmon
+# From the nixmon directory
+./install.sh
+
+# Or from anywhere, pointing to the flake
+./install.sh /path/to/nixmon
+
+# Or install directly from GitHub (once published)
+nix profile install github:yourusername/nixmon#nixmon
 ```
 
-Or clone and run locally:
+After installation, simply run:
 
 ```bash
-git clone https://github.com/yourusername/nixmon.git
-cd nixmon
+nixmon
+```
+
+The `nixmon` command will be available in your PATH, just like any other system command.
+
+### Alternative: Run Without Installation
+
+Run directly with Nix (no installation needed):
+
+```bash
+# From GitHub (once published)
+nix run github:yourusername/nixmon
+
+# Or from local directory
 nix run .
+```
+
+### Update
+
+```bash
+nix profile upgrade nixmon
+```
+
+### Uninstall
+
+```bash
+nix profile remove nixmon
 ```
 
 ## Configuration
 
-Environment variables:
+### Environment Variables
 
 - `NIXMON_THEME`: Color theme (default, nord, gruvbox, dracula, monokai, solarized)
 - `NIXMON_REFRESH`: Refresh interval in seconds (default: 2)
@@ -47,17 +83,57 @@ Environment variables:
 Example:
 
 ```bash
-NIXMON_THEME=nord nix run .
+NIXMON_THEME=nord nixmon
 ```
+
+### Configuration File
+
+Create `~/.config/nixmon/config` with:
+
+```
+theme=nord
+refresh=1.5
+sort=cpu
+```
+
+## Keyboard Shortcuts
+
+- `q`, `Esc` - Quit
+- `+`, `=` - Increase refresh rate
+- `-`, `_` - Decrease refresh rate
+- `t` - Cycle themes
+- `s` - Cycle sort key (CPU/MEM/PID/NAME)
+- `f` - Clear process filter
+- `k` - Kill selected process
+- `h`, `?` - Toggle help overlay
+- Arrow keys - Navigate process list (when implemented)
+
+## Mouse Support
+
+- Scroll wheel - Scroll process list
+- Click - Select process (when implemented)
+
+## Additional Commands
+
+After installation, several commands are available:
+
+- `nixmon` - Run the system monitor
+- `nixmon-themes` - Preview available themes
+- `nixmon-export-json` - Export current metrics to JSON
+- `nixmon-export-csv` - Export current metrics to CSV
 
 ## Implementation
 
 nixmon is implemented entirely in the Nix language, demonstrating advanced Nix programming techniques including:
 
 - Pure functional data processing
-- ANSI terminal rendering
+- ANSI terminal rendering with Unicode box-drawing characters
 - System metrics collection via `/proc` (Linux) and system commands (macOS)
-- State management for delta calculations
+- State management for delta calculations (CPU usage, network speed, etc.)
+- Real-time terminal UI with flicker reduction
+- Signal handling for terminal resize events
+- Mouse event parsing and handling
+- Modular architecture with separate modules for UI, metrics, and platform-specific code
 
 ## License
 

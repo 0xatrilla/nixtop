@@ -50,9 +50,15 @@ rec {
   filterByMemThreshold = threshold: processes:
     builtins.filter (p: (p.memPercent or 0) >= threshold) processes;
 
-  # Search by name
+  # Search by name (case-insensitive substring match)
   searchByName = query: processes:
-    builtins.filter (p: utils.contains query (p.name or "")) processes;
+    if query == "" then processes
+    else let
+      queryLower = utils.toLower query;
+    in builtins.filter (p: 
+      let nameLower = utils.toLower (p.name or "");
+      in utils.contains queryLower nameLower
+    ) processes;
 
   # ============================================================================
   # Process Formatting
@@ -148,7 +154,7 @@ rec {
   # Main Process Metrics Function
   # ============================================================================
   
-  getMetrics = { prevState ? {}, sortKey ? "cpu", maxProcesses ? 20, interval ? 2 }:
+  getMetrics = { prevState ? {}, sortKey ? "cpu", maxProcesses ? 20, interval ? 2, processFilter ? "" }:
     let
       # Get raw process list from platform
       rawProcesses = platform.getProcessList;
@@ -177,8 +183,9 @@ rec {
       };
       
       # Filter and sort
-      filtered = filterUserProcesses withMemPct;
-      sorted = sortBy sortKey filtered;
+      userFiltered = filterUserProcesses withMemPct;
+      nameFiltered = searchByName processFilter userFiltered;
+      sorted = sortBy sortKey nameFiltered;
       
       # Take top N
       topProcesses = utils.take maxProcesses sorted;
@@ -187,15 +194,16 @@ rec {
       formatted = map (p: formatProcess { process = p; }) topProcesses;
       
       # Calculate summary stats
-      totalCpu = utils.sum (map (p: p.cpuPercent or 0) filtered);
-      totalMem = utils.sum (map (p: p.memPercent or 0) filtered);
+      totalCpu = utils.sum (map (p: p.cpuPercent or 0) nameFiltered);
+      totalMem = utils.sum (map (p: p.memPercent or 0) nameFiltered);
       
     in {
       processes = topProcesses;
       formatted = formatted;
       
       # Summary
-      count = builtins.length filtered;
+      count = builtins.length nameFiltered;
+      filtered = processFilter != "";
       totalCpuUsage = totalCpu;
       totalMemUsage = totalMem;
       

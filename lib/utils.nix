@@ -126,6 +126,24 @@ rec {
       end = findEnd (chars - 1);
     in if start >= end then ""
        else builtins.substring start (end - start) str;
+  
+  # Convert string to lowercase (simple ASCII-only implementation)
+  toLower = str:
+    let
+      len = builtins.stringLength str;
+      convertChar = i:
+        if i >= len then ""
+        else let
+          c = builtins.substring i 1 str;
+          code = builtins.substring 0 1 c;
+          # Simple ASCII conversion: A-Z (65-90) -> a-z (97-122)
+          # In Nix, we can't easily do character code conversion, so use string replacement
+          lower = builtins.replaceStrings 
+            ["A" "B" "C" "D" "E" "F" "G" "H" "I" "J" "K" "L" "M" "N" "O" "P" "Q" "R" "S" "T" "U" "V" "W" "X" "Y" "Z"]
+            ["a" "b" "c" "d" "e" "f" "g" "h" "i" "j" "k" "l" "m" "n" "o" "p" "q" "r" "s" "t" "u" "v" "w" "x" "y" "z"]
+            c;
+        in lower + convertChar (i + 1);
+    in convertChar 0;
 
   # Check if string contains substring
   contains = needle: haystack:

@@ -34,7 +34,7 @@ in rec {
   
   # Render a single frame of the dashboard
   # This is called by the shell wrapper on each refresh
-  render = { width ? 80, height ? 24, theme ? "default", stateFile ? "/tmp/nixmon-state.json" }:
+  render = { width ? 80, height ? 24, theme ? "default", stateFile ? "/tmp/nixmon-state.json", processFilter ? "", sortKey ? "cpu", showHelp ? false, selectedPid ? null }:
     let
       # Read previous state
       prevStateResult = readState stateFile;
@@ -47,7 +47,8 @@ in rec {
       netMetrics = metrics.network.getMetrics { inherit prevState; interval = 2; };
       procMetrics = metrics.processes.getMetrics { 
         inherit prevState; 
-        sortKey = "cpu"; 
+        inherit sortKey;
+        processFilter = processFilter;
         maxProcesses = 15; 
         interval = 2; 
       };
@@ -75,19 +76,115 @@ in rec {
       frame = ui.render.renderFrame {
         inherit cpuMetrics memMetrics netMetrics diskMetrics procMetrics tempMetrics batteryMetrics;
         inherit width height theme;
+        selectedPid = selectedPid;
       };
       
       # Add header
       header = ui.render.renderHeader { inherit width theme uptime; };
       
+      # Help overlay if requested
+      helpOverlay = if showHelp then ui.render.renderHelp { inherit width height theme; } else "";
+      
+      # Process details overlay if process selected
+      selectedProcess = if selectedPid != null 
+        then utils.find (p: p.pid == selectedPid) (procMetrics.processes or [])
+        else null;
+      processDetailsOverlay = if selectedProcess != null && !showHelp
+        then ui.render.renderProcessDetails { 
+          process = selectedProcess; 
+          inherit width height theme; 
+        }
+        else "";
+      
       # Special marker to separate frame from state JSON
       # The shell script will split on this marker
     in ''
       ${header}
-      ${frame}
+      ${if showHelp then helpOverlay else if processDetailsOverlay != "" then processDetailsOverlay else frame}
       __NIXMON_STATE_JSON__
       ${stateJson}'';
 
+  # ============================================================================
+  # Export Functions
+  # ============================================================================
+  
+  # Export current metrics to JSON
+  exportJSON = { stateFile ? "/tmp/nixmon-state.json" }:
+    let
+      prevStateResult = readState stateFile;
+      prevState = if prevStateResult.success then prevStateResult.value else {};
+      
+      cpuMetrics = metrics.cpu.getMetrics { inherit prevState; };
+      memMetrics = metrics.memory.getMetrics { inherit prevState; };
+      diskMetrics = metrics.disk.getMetrics { inherit prevState; interval = 2; };
+      netMetrics = metrics.network.getMetrics { inherit prevState; interval = 2; };
+      procMetrics = metrics.processes.getMetrics { 
+        inherit prevState; 
+        sortKey = "cpu"; 
+        maxProcesses = 50; 
+        interval = 2; 
+      };
+      tempMetrics = metrics.temperature.getMetrics { inherit prevState; };
+      batteryMetrics = metrics.battery.getMetrics { inherit prevState; };
+      
+      exportData = {
+        timestamp = builtins.currentTime;
+        cpu = {
+          overall = cpuMetrics.overall or 0;
+          cores = cpuMetrics.cores or [];
+          history = cpuMetrics.history or [];
+        };
+        memory = {
+          used = memMetrics.used or 0;
+          total = memMetrics.total or 0;
+          usedPercent = memMetrics.usedPercent or 0;
+        };
+        network = {
+          primary = netMetrics.primary or {};
+          totalRxRate = netMetrics.total.rxRate or 0;
+          totalTxRate = netMetrics.total.txRate or 0;
+        };
+        disk = {
+          mounts = diskMetrics.mounts or [];
+        };
+        processes = {
+          count = procMetrics.count or 0;
+          top = map (p: {
+            pid = p.pid;
+            name = p.name;
+            cpuPercent = p.cpuPercent or 0;
+            memPercent = p.memPercent or 0;
+          }) (procMetrics.processes or []);
+        };
+        temperature = {
+          cpu = tempMetrics.cpu.temp or 0;
+        };
+        battery = batteryMetrics;
+      };
+      
+    in builtins.toJSON exportData;
+  
+  # Export to CSV format
+  exportCSV = { stateFile ? "/tmp/nixmon-state.json" }:
+    let
+      prevStateResult = readState stateFile;
+      prevState = if prevStateResult.success then prevStateResult.value else {};
+      
+      cpuMetrics = metrics.cpu.getMetrics { inherit prevState; };
+      memMetrics = metrics.memory.getMetrics { inherit prevState; };
+      procMetrics = metrics.processes.getMetrics { 
+        inherit prevState; 
+        sortKey = "cpu"; 
+        maxProcesses = 50; 
+        interval = 2; 
+      };
+      
+      timestamp = builtins.currentTime;
+      header = "timestamp,cpu_percent,mem_percent,process_count";
+      dataLine = "${toString timestamp},${toString (cpuMetrics.overall or 0)},${toString (memMetrics.usedPercent or 0)},${toString (procMetrics.count or 0)}";
+      
+    in "${header}\n${dataLine}";
+  
   # ============================================================================
   # Compact Mode (for small terminals)
   # ============================================================================
