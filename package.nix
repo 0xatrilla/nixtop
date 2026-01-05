@@ -53,7 +53,7 @@ in stdenv.mkDerivation rec {
 
   src = fetchFromGitHub {
     owner = "0xatrilla";
-    repo = "nixmon";
+    repo = "nixtop";
     rev = "main"; # Using main branch - update to "v${version}" when tag is created
     hash = "sha256-CHNwgeFt4MTCkBsiKkivOICLLEM48+R3zq1JDWvzqHk"; # Hash from nixtop repo (update if repo is renamed to nixmon)
     # Alternative: use fetchFromGitHub with a specific commit
