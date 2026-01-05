@@ -51,12 +51,11 @@ in stdenv.mkDerivation rec {
   pname = "nixmon";
   version = "0.1.0";
 
-  # TODO: Update this URL once the repository is published on GitHub
   src = fetchFromGitHub {
     owner = "0xatrilla";
     repo = "nixmon";
     rev = "v${version}";
-    hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="; # Update with actual hash
+    hash = lib.fakeHash; # Will be replaced with actual hash on first build
     # Alternative: use fetchFromGitHub with a specific commit
     # rev = "abc123...";
     # hash = "sha256-...";
