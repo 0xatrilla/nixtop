@@ -379,9 +379,9 @@ CSV_EOF
       - Mouse support for scrolling
       - Keyboard shortcuts for navigation
     '';
-    homepage = "https://github.com/yourusername/nixmon";
+    homepage = "https://github.com/0xatrilla/nixtop";
     license = licenses.mit;
-    maintainers = with maintainers; [ ];
+    maintainers = with maintainers; [ 0xatrilla ];
     platforms = platforms.unix;
     mainProgram = "nixmon";
   };
