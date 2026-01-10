@@ -31,33 +31,104 @@
           # Interactivity state
           PROCESS_FILTER=""
           SORT_KEY="cpu"
+          PROCESS_SORT_REVERSED=false
           SELECTED_PID=""
+          PROCESS_SELECTION_INDEX=0
           SHOW_HELP=false
+          SHOW_DETAILS=false
           PROCESS_SCROLL_OFFSET=0
           MAX_PROCESS_SCROLL=0
+          PREFERRED_NET_IFACE="auto"
+          DISK_FILTER=""
+
+          HEADER_HEIGHT=1
+          TOP_ROW_HEIGHT=8
+          MID_ROW_HEIGHT=7
+          INFO_BAR_HEIGHT=1
+          PROCESS_MAX_ROWS=0
+          PROCESS_LIST_START=0
+          INPUT_PENDING=false
           
-          # Load configuration file if it exists
-          CONFIG_FILE="$HOME/.config/nixmon/config"
-          if [ -f "$CONFIG_FILE" ]; then
-            # Source config file (simple key=value format)
-            while IFS='=' read -r key value; do
-              case "$key" in
-                theme) THEME="$value" ;;
-                refresh) REFRESH_RATE="$value" ;;
-                sort) SORT_KEY="$value" ;;
-              esac
-            done < "$CONFIG_FILE" 2>/dev/null || true
-          fi
+          # Configuration file handling
+          CONFIG_DIR="''${XDG_CONFIG_HOME:-$HOME/.config}/nixmon"
+          CONFIG_FILE="$CONFIG_DIR/nixmon.conf"
+
+          ensure_config() {
+            if [ ! -d "$CONFIG_DIR" ]; then
+              mkdir -p "$CONFIG_DIR" 2>/dev/null || true
+            fi
+            if [ ! -f "$CONFIG_FILE" ]; then
+              cat > "$CONFIG_FILE" <<'EOF'
+          # btop-compatible config keys
+          color_theme = "default"
+          update_ms = 2000
+          proc_sorting = "cpu"
+          proc_reversed = false
+          net_iface = "auto"
+          disk_filter = ""
+          EOF
+            fi
+          }
+
+          parse_bool() {
+            case "$1" in
+              true|True|TRUE|1|yes|on) echo "true" ;;
+              *) echo "false" ;;
+            esac
+          }
+
+          load_config() {
+            if [ -f "$CONFIG_FILE" ]; then
+              while IFS= read -r line; do
+                line=$(printf '%s' "$line" | sed 's/#.*$//')
+                [ -z "$line" ] && continue
+                IFS='=' read -r key value <<EOF
+          $line
+          EOF
+                key=$(printf '%s' "$key" | sed 's/[[:space:]]//g')
+                value=$(printf '%s' "$value" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+                value=$(printf '%s' "$value" | sed 's/^"//;s/"$//')
+                case "$key" in
+                  "") continue ;;
+                  color_theme) THEME="$value" ;;
+                  update_ms)
+                    if [ -n "$value" ]; then
+                      REFRESH_RATE=$(echo "$value" | awk '{ms=$1; if(ms<100) ms=100; printf "%.1f", ms/1000}')
+                    fi
+                    ;;
+                  proc_sorting)
+                    case "$value" in
+                      cpu) SORT_KEY="cpu" ;;
+                      memory|mem) SORT_KEY="mem" ;;
+                      pid) SORT_KEY="pid" ;;
+                      name|command) SORT_KEY="name" ;;
+                    esac
+                    ;;
+                  proc_reversed) PROCESS_SORT_REVERSED=$(parse_bool "$value") ;;
+                  net_iface) PREFERRED_NET_IFACE="$value" ;;
+                  disk_filter) DISK_FILTER="$value" ;;
+                esac
+              done < "$CONFIG_FILE" 2>/dev/null || true
+            fi
+          }
+
+          ensure_config
+          load_config
           
           # Save terminal state
           save_terminal() {
-            # Save cursor position
+            # Save cursor position and stty state
             printf '\e[s'
+            STTY_STATE=$(stty -g < /dev/tty 2>/dev/null || echo "")
             # Note: We'll enable alternate screen buffer separately after setup
           }
           
           # Restore terminal state
           restore_terminal() {
+            # Restore stty state
+            if [ -n "$STTY_STATE" ]; then
+              stty "$STTY_STATE" < /dev/tty 2>/dev/null || true
+            fi
             # Disable mouse tracking
             printf '\e[?1000l' 2>/dev/null || true
             printf '\e[?1003l' 2>/dev/null || true
@@ -70,6 +141,49 @@
             printf '\e[?25h'
             # Reset colors
             printf '\e[0m'
+          }
+
+          setup_terminal() {
+            # Enable alternate screen buffer
+            printf '\e[?1049h' 2>/dev/null || true
+
+            # Enable mouse support (if terminal supports it)
+            # ?1000h = X10 mouse mode (basic)
+            # ?1002h = button-event mouse mode (better)
+            # ?1003h = any-event mouse mode (best, includes mouse move)
+            # ?1006h = SGR mouse mode (extended coordinates)
+            printf '\e[?1006h' 2>/dev/null || true  # Enable SGR mouse mode (best)
+            printf '\e[?1003h' 2>/dev/null || true  # Enable any-event mouse mode
+            printf '\e[?1000h' 2>/dev/null || true  # Enable basic mouse tracking (fallback)
+
+            # Raw input mode for single key reads
+            stty raw -echo -ixon < /dev/tty 2>/dev/null || true
+
+            printf '\e[?25l'  # Hide cursor
+            printf '\e[2J\e[H'    # Clear screen and move to top-left
+          }
+
+          edit_config() {
+            ensure_config
+            restore_terminal
+
+            local editor=""
+            if [ -n "''${EDITOR:-}" ] && command -v "$EDITOR" >/dev/null 2>&1; then
+              editor="$EDITOR"
+            elif [ -n "''${VISUAL:-}" ] && command -v "$VISUAL" >/dev/null 2>&1; then
+              editor="$VISUAL"
+            elif command -v nano >/dev/null 2>&1; then
+              editor="nano"
+            elif command -v vi >/dev/null 2>&1; then
+              editor="vi"
+            fi
+
+            if [ -n "$editor" ]; then
+              "$editor" "$CONFIG_FILE"
+            fi
+
+            setup_terminal
+            load_config
           }
           
           # Cleanup on exit
@@ -96,21 +210,7 @@
           
           # Setup terminal
           save_terminal
-          
-          # Enable alternate screen buffer (saves main screen, shows alternate)
-          printf '\e[?1049h' 2>/dev/null || true
-          
-          # Enable mouse support (if terminal supports it)
-          # ?1000h = X10 mouse mode (basic)
-          # ?1002h = button-event mouse mode (better)
-          # ?1003h = any-event mouse mode (best, includes mouse move)
-          # ?1006h = SGR mouse mode (extended coordinates)
-          printf '\e[?1006h' 2>/dev/null || true  # Enable SGR mouse mode (best)
-          printf '\e[?1003h' 2>/dev/null || true  # Enable any-event mouse mode
-          printf '\e[?1000h' 2>/dev/null || true  # Enable basic mouse tracking (fallback)
-          
-          printf '\e[?25l'  # Hide cursor
-          printf '\e[2J\e[H'    # Clear screen and move to top-left
+          setup_terminal
           
           # Get terminal dimensions
           get_dimensions() {
@@ -137,9 +237,20 @@
               LINES=24
             fi
           }
+
+          calculate_layout() {
+            local rows
+            rows=$((LINES - TOP_ROW_HEIGHT - MID_ROW_HEIGHT - HEADER_HEIGHT - INFO_BAR_HEIGHT - 4))
+            if [ "$rows" -lt 0 ]; then
+              rows=0
+            fi
+            PROCESS_MAX_ROWS=$rows
+            PROCESS_LIST_START=$((HEADER_HEIGHT + 1 + TOP_ROW_HEIGHT + MID_ROW_HEIGHT + 3))
+          }
           
           # Initialize dimensions before starting
           get_dimensions
+          calculate_layout
           
           # Initialize state file
           echo '{}' > "$STATE_FILE"
@@ -172,21 +283,29 @@
           parse_mouse_event() {
             local seq="$1"
             local button x y action_type
-            
-            # Try SGR format first: \e[<button;x;yM or \e[<button;x;ym
-            if echo "$seq" | grep -qE '^\e\[<[0-9]+;[0-9]+;[0-9]+[Mm]$'; then
-              # Extract button;x;y
-              local cleaned=$(echo "$seq" | sed 's/^\e\[<//' | sed 's/[Mm]$//')
-              button=$(echo "$cleaned" | cut -d';' -f1)
-              x=$(echo "$cleaned" | cut -d';' -f2)
-              y=$(echo "$cleaned" | cut -d';' -f3)
+
+            # SGR format: \e[<button;x;yM or \e[<button;x;ym
+            if [[ "$seq" == *$'\e[<'* ]]; then
+              local rest="''${seq#*$'\e[<'}"
+              local payload="''${rest%%[mM]*}"
+              local terminator="''${rest#''${payload}}"
+              terminator="''${terminator:0:1}"
+              if [ -z "$payload" ] || [ -z "$terminator" ]; then
+                return 1
+              fi
+              button="''${payload%%;*}"
+              local remainder="''${payload#*;}"
+              x="''${remainder%%;*}"
+              y="''${remainder#*;}"
               action_type=$button
-            # Try legacy format: \e[M<button_char><x_char><y_char>
-            elif echo "$seq" | grep -qE '^\e\[M.' && [ $(echo -n "$seq" | wc -c) -ge 6 ]; then
-              # Legacy format: button is encoded as a character (32 + button_code)
-              local button_char=$(echo "$seq" | cut -c4)
-              local x_char=$(echo "$seq" | cut -c5)
-              local y_char=$(echo "$seq" | cut -c6)
+
+            # Legacy format: \e[M button+x+y (encoded)
+            elif [[ "$seq" == *$'\e[M'* ]]; then
+              # Extract encoded values
+              local tail="''${seq#*$'\e[M'}"
+              local button_char="''${tail:0:1}"
+              local x_char="''${tail:1:1}"
+              local y_char="''${tail:2:1}"
               button=$(printf '%d' "'$button_char")
               x=$(printf '%d' "'$x_char")
               y=$(printf '%d' "'$y_char")
@@ -221,53 +340,96 @@
               return 0
             fi
             
-            # Handle clicks in process list area (for future enhancement)
-            # Process box typically starts around line 17-18
-            # For now, we just acknowledge mouse clicks but don't process them
-            # This can be enhanced later to select processes by clicking
+            # Handle clicks in process list area
+            if [ "$action_type" -lt 64 ]; then
+              if [ "$SHOW_HELP" = "false" ] && [ "$SHOW_DETAILS" = "false" ] && [ -n "$y" ] && [ "$y" -ge "$PROCESS_LIST_START" ]; then
+                local row=$((y - PROCESS_LIST_START))
+                if [ "$row" -ge 0 ] && [ "$row" -lt "$PROCESS_MAX_ROWS" ]; then
+                  PROCESS_SELECTION_INDEX="$row"
+                fi
+              fi
+            fi
             
             return 0
           }
           
+          move_selection_up() {
+            if [ "$PROCESS_MAX_ROWS" -le 0 ]; then
+              return
+            fi
+            if [ "$PROCESS_SELECTION_INDEX" -gt 0 ]; then
+              PROCESS_SELECTION_INDEX=$((PROCESS_SELECTION_INDEX - 1))
+            elif [ "$PROCESS_SCROLL_OFFSET" -gt 0 ]; then
+              PROCESS_SCROLL_OFFSET=$((PROCESS_SCROLL_OFFSET - 1))
+            fi
+          }
+
+          move_selection_down() {
+            if [ "$PROCESS_MAX_ROWS" -le 0 ]; then
+              return
+            fi
+            local max_index=$((PROCESS_MAX_ROWS - 1))
+            if [ "$PROCESS_SELECTION_INDEX" -lt "$max_index" ]; then
+              PROCESS_SELECTION_INDEX=$((PROCESS_SELECTION_INDEX + 1))
+            elif [ "$PROCESS_SCROLL_OFFSET" -lt "$MAX_PROCESS_SCROLL" ]; then
+              PROCESS_SCROLL_OFFSET=$((PROCESS_SCROLL_OFFSET + 1))
+            fi
+          }
+
+          move_selection_page() {
+            local direction="$1"
+            local step=5
+            local i
+            for i in $(seq 1 "$step"); do
+              if [ "$direction" = "up" ]; then
+                move_selection_up
+              else
+                move_selection_down
+              fi
+            done
+          }
+
           # Check for keyboard and mouse input (non-blocking)
           # Returns: 0 if input available, 1 if not
           check_input() {
-            if [ -t 0 ]; then
-              # Read with timeout 0 (non-blocking) and read up to 20 chars to capture escape sequences
+            if [ -r /dev/tty ]; then
+              # Read first byte with tiny timeout
               local input=""
-              IFS= read -t 0 -r -n 20 input 2>/dev/null || return 1
+              IFS= read -t 0.05 -r -n 1 -s input < /dev/tty 2>/dev/null || return 1
               
               if [ -z "$input" ]; then
                 return 1
               fi
+
+              # Read any queued bytes without blocking
+              local extra=""
+              while IFS= read -t 0.005 -r -n 1 -s extra < /dev/tty 2>/dev/null; do
+                input="$input$extra"
+              done
               
               # Check for escape sequence (mouse events start with \e[)
-              if echo "$input" | grep -q '^\e\['; then
+              if [[ "$input" == *$'\e['* ]]; then
                 # Check if it's a mouse event
                 # SGR format: \e[<button;x;yM
-                if echo "$input" | grep -qE '^\e\[<[0-9]+;[0-9]+;[0-9]+[Mm]$'; then
+                if [[ "$input" == *$'\e[<'* ]] || [[ "$input" == *$'\e[M'* ]]; then
                   parse_mouse_event "$input" && return 0
-                # Legacy format: \e[M<button;x;y
-                elif echo "$input" | grep -qE '^\e\[M.'; then
-                  parse_mouse_event "$input" && return 0
+                elif [ "$input" = $'\e[A' ]; then
+                  move_selection_up
+                  return 0
+                elif [ "$input" = $'\e[B' ]; then
+                  move_selection_down
+                  return 0
+                elif [ "$input" = $'\e[5~' ]; then
+                  move_selection_page up
+                  return 0
+                elif [ "$input" = $'\e[6~' ]; then
+                  move_selection_page down
+                  return 0
                 elif [ "$input" = $'\e' ] || [ "$input" = $'\e[' ]; then
-                  # Escape key (might be incomplete, wait for more)
-                  # Try to read more if available
-                  local more_input=""
-                  if IFS= read -t 0.01 -r -n 10 more_input 2>/dev/null; then
-                    input="$input$more_input"
-                    # Check again
-                    if echo "$input" | grep -qE '^\e\[<[0-9]+;[0-9]+;[0-9]+[Mm]$'; then
-                      parse_mouse_event "$input" && return 0
-                    elif echo "$input" | grep -qE '^\e\[M.'; then
-                      parse_mouse_event "$input" && return 0
-                    fi
-                  fi
-                  # If still just escape, quit
                   RUNNING=false
                   return 0
                 fi
-                # Other escape sequences (arrow keys, etc.) - ignore for now
+                # Other escape sequences - ignore for now
                 return 0
               fi
               
@@ -298,6 +460,11 @@
                   esac
                   return 0
                   ;;
+                e|E)
+                  # Edit config file
+                  edit_config
+                  return 0
+                  ;;
                 f|F)
                   # Toggle filter mode - clear filter
                   if [ -n "$PROCESS_FILTER" ]; then
@@ -316,6 +483,20 @@
                     pid) SORT_KEY=name ;;
                     *) SORT_KEY=cpu ;;
                   esac
+                  return 0
+                  ;;
+                r|R)
+                  # Toggle sort direction
+                  PROCESS_SORT_REVERSED=$([ "$PROCESS_SORT_REVERSED" = true ] && echo false || echo true)
+                  return 0
+                  ;;
+                $'\n'|$'\r')
+                  # Toggle process details overlay
+                  SHOW_DETAILS=$([ "$SHOW_DETAILS" = true ] && echo false || echo true)
+                  return 0
+                  ;;
+                i|I)
+                  SHOW_DETAILS=$([ "$SHOW_DETAILS" = true ] && echo false || echo true)
                   return 0
                   ;;
                 k|K)
@@ -339,6 +520,20 @@
               esac
             fi
             return 1
+          }
+
+          extract_state_number() {
+            local key="$1"
+            local json="$2"
+            local value=""
+            value=$(printf '%s' "$json" | sed -n "s/.*\"$key\":\([0-9]*\).*/\1/p" | head -n 1)
+            if [ -n "$value" ]; then
+              printf '%s' "$value"
+            fi
+          }
+
+          escape_nix_string() {
+            printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
           }
           
           # Platform-specific data collection functions
@@ -416,6 +611,7 @@
             set +e
             get_dimensions
             set -e
+            calculate_layout
             
             # Check for keyboard input (non-blocking)
             check_input || true
@@ -466,6 +662,10 @@
             # Capture stderr for debugging (only show on first error)
             ERR_FILE="/tmp/nixmon-error-$$.txt"
             OUTPUT=""
+            ESCAPED_PROCESS_FILTER=$(escape_nix_string "$PROCESS_FILTER")
+            ESCAPED_SORT_KEY=$(escape_nix_string "$SORT_KEY")
+            ESCAPED_PREFERRED_NET_IFACE=$(escape_nix_string "$PREFERRED_NET_IFACE")
+            ESCAPED_DISK_FILTER=$(escape_nix_string "$DISK_FILTER")
             if OUTPUT=$(${pkgs.nix}/bin/nix eval --raw --impure \
               --expr "let
                 pkgs = import ${nixpkgs} { system = \"${system}\"; };
@@ -476,10 +676,16 @@
                 height = $LINES;
                 theme = \"$THEME\";
                 stateFile = \"$STATE_FILE\";
-                processFilter = \"$PROCESS_FILTER\";
-                sortKey = \"$SORT_KEY\";
+                processFilter = \"$ESCAPED_PROCESS_FILTER\";
+                sortKey = \"$ESCAPED_SORT_KEY\";
+                sortReversed = $(if [ "$PROCESS_SORT_REVERSED" = "true" ]; then echo "true"; else echo "false"; fi);
+                processScrollOffset = $PROCESS_SCROLL_OFFSET;
+                processSelectionIndex = $PROCESS_SELECTION_INDEX;
                 showHelp = $(if [ "$SHOW_HELP" = "true" ]; then echo "true"; else echo "false"; fi);
+                showProcessDetails = $(if [ "$SHOW_DETAILS" = "true" ]; then echo "true"; else echo "false"; fi);
                 selectedPid = $(if [ -n "$SELECTED_PID" ]; then echo "$SELECTED_PID"; else echo "null"; fi);
+                preferredNetInterface = \"$ESCAPED_PREFERRED_NET_IFACE\";
+                diskFilter = \"$ESCAPED_DISK_FILTER\";
               }" \
               2>"$ERR_FILE" 2>&1); then
               # Success - clear error file
@@ -558,6 +764,35 @@
               FIRST_CHAR=$(printf '%s' "$STATE_JSON" | head -c 1)
               if [ "$FIRST_CHAR" = "{" ]; then
                 printf '%s' "$STATE_JSON" > "$STATE_FILE"
+              fi
+            fi
+
+            if [ -n "$STATE_JSON" ]; then
+              NEW_MAX_ROWS=$(extract_state_number "processMaxRows" "$STATE_JSON")
+              if [ -n "$NEW_MAX_ROWS" ]; then
+                PROCESS_MAX_ROWS="$NEW_MAX_ROWS"
+              fi
+              NEW_LIST_START=$(extract_state_number "processListStart" "$STATE_JSON")
+              if [ -n "$NEW_LIST_START" ]; then
+                PROCESS_LIST_START="$NEW_LIST_START"
+              fi
+              NEW_MAX_SCROLL=$(extract_state_number "processMaxScroll" "$STATE_JSON")
+              if [ -n "$NEW_MAX_SCROLL" ]; then
+                MAX_PROCESS_SCROLL="$NEW_MAX_SCROLL"
+              fi
+              NEW_SCROLL=$(extract_state_number "processScrollOffset" "$STATE_JSON")
+              if [ -n "$NEW_SCROLL" ]; then
+                PROCESS_SCROLL_OFFSET="$NEW_SCROLL"
+              fi
+              NEW_SELECTED_INDEX=$(extract_state_number "processSelectedIndex" "$STATE_JSON")
+              if [ -n "$NEW_SELECTED_INDEX" ]; then
+                PROCESS_SELECTION_INDEX="$NEW_SELECTED_INDEX"
+              fi
+              NEW_SELECTED_PID=$(extract_state_number "processSelectedPid" "$STATE_JSON")
+              if [ -n "$NEW_SELECTED_PID" ] && [ "$NEW_SELECTED_PID" -gt 0 ]; then
+                SELECTED_PID="$NEW_SELECTED_PID"
+              else
+                SELECTED_PID=""
               fi
             fi
             
@@ -715,7 +950,7 @@
             echo "  NIXMON_THEME=<name>   - Set theme (default, nord, monokai, gruvbox, etc.)"
             echo "  NIXMON_REFRESH=<sec>  - Set refresh rate (default: 2)"
             echo ""
-            echo "Configuration: ~/.config/nixmon/config"
+            echo "Configuration: ~/.config/nixmon/nixmon.conf (or $XDG_CONFIG_HOME/nixmon/nixmon.conf)"
           '';
         };
       }

@@ -34,7 +34,7 @@ in rec {
   
   # Render a single frame of the dashboard
   # This is called by the shell wrapper on each refresh
-  render = { width ? 80, height ? 24, theme ? "default", stateFile ? "/tmp/nixmon-state.json", processFilter ? "", sortKey ? "cpu", showHelp ? false, selectedPid ? null }:
+  render = { width ? 80, height ? 24, theme ? "default", stateFile ? "/tmp/nixmon-state.json", processFilter ? "", sortKey ? "cpu", sortReversed ? false, showHelp ? false, showProcessDetails ? false, selectedPid ? null, processScrollOffset ? 0, processSelectionIndex ? 0, preferredNetInterface ? "auto", diskFilter ? "" }:
     let
       # Read previous state
       prevStateResult = readState stateFile;
@@ -43,13 +43,12 @@ in rec {
       # Collect all metrics
       cpuMetrics = metrics.cpu.getMetrics { inherit prevState; };
       memMetrics = metrics.memory.getMetrics { inherit prevState; };
-      diskMetrics = metrics.disk.getMetrics { inherit prevState; interval = 2; };
-      netMetrics = metrics.network.getMetrics { inherit prevState; interval = 2; };
+      diskMetrics = metrics.disk.getMetrics { inherit prevState; interval = 2; mountFilter = diskFilter; };
+      netMetrics = metrics.network.getMetrics { inherit prevState; interval = 2; preferredInterface = preferredNetInterface; };
       procMetrics = metrics.processes.getMetrics { 
         inherit prevState; 
-        inherit sortKey;
+        inherit sortKey sortReversed;
         processFilter = processFilter;
-        maxProcesses = 15; 
         interval = 2; 
       };
       tempMetrics = metrics.temperature.getMetrics { inherit prevState; };
@@ -58,6 +57,69 @@ in rec {
       # Get system info
       uptime = platform.getUptime;
       loadAvg = platform.getLoadAverage;
+
+      # Layout-derived process viewport sizing
+      layout = ui.render.layout;
+      topRowHeight = layout.topRowHeight;
+      midRowHeight = layout.midRowHeight;
+      procHeight = height - topRowHeight - midRowHeight - layout.headerHeight - layout.infoBarHeight;
+      maxProcessRows = if procHeight > 4 then procHeight - 4 else 0;
+      maxProcessScroll = utils.max [0 ((procMetrics.count or 0) - maxProcessRows)];
+      clampedScrollOffset = utils.clamp 0 maxProcessScroll processScrollOffset;
+
+      formattedProcesses = procMetrics.formatted or [];
+      visibleProcesses = utils.take maxProcessRows (utils.drop clampedScrollOffset formattedProcesses);
+      visibleCount = builtins.length visibleProcesses;
+      maxSelectionIndex = if visibleCount > 0 then visibleCount - 1 else 0;
+      clampedSelectionIndex = if visibleCount > 0
+        then utils.clamp 0 maxSelectionIndex processSelectionIndex
+        else 0;
+      selectionEntry = if visibleCount > 0 then builtins.elemAt visibleProcesses clampedSelectionIndex else null;
+      resolvedSelectedPid = if selectionEntry != null then selectionEntry.pidValue else null;
+
+      # Compute actual top/mid row lengths for click mapping
+      cpuWidth = (width * 60) / 100;
+      memWidth = width - cpuWidth;
+      netWidth = (width * 55) / 100;
+      diskWidth = width - netWidth;
+
+      cpuBox = ui.render.renderCpuBox {
+        inherit cpuMetrics theme;
+        width = cpuWidth - 1;
+      };
+
+      memBox = ui.render.renderMemoryBox {
+        inherit memMetrics theme;
+        width = memWidth;
+      };
+
+      netBox = ui.render.renderNetworkBox {
+        inherit netMetrics theme;
+        width = netWidth - 1;
+      };
+
+      diskBox = ui.render.renderDiskBox {
+        inherit diskMetrics theme;
+        width = diskWidth;
+      };
+
+      topRowLines = ui.boxes.splitHorizontal {
+        leftContent = cpuBox;
+        rightContent = memBox;
+        leftWidth = cpuWidth - 1;
+        rightWidth = memWidth;
+        gap = 0;
+      };
+
+      midRowLines = ui.boxes.splitHorizontal {
+        leftContent = netBox;
+        rightContent = diskBox;
+        leftWidth = netWidth - 1;
+        rightWidth = diskWidth;
+        gap = 0;
+      };
+
+      processListStart = layout.headerHeight + builtins.length topRowLines + builtins.length midRowLines + 4;
       
       # Combine state data for persistence
       newState = 
@@ -67,7 +129,16 @@ in rec {
         netMetrics.stateData //
         procMetrics.stateData //
         tempMetrics.stateData //
-        batteryMetrics.stateData;
+        batteryMetrics.stateData //
+        {
+          processCount = procMetrics.count or 0;
+          processMaxRows = maxProcessRows;
+          processListStart = processListStart;
+          processMaxScroll = maxProcessScroll;
+          processScrollOffset = clampedScrollOffset;
+          processSelectedIndex = clampedSelectionIndex;
+          processSelectedPid = if resolvedSelectedPid == null then 0 else resolvedSelectedPid;
+        };
       
       # Serialize state for persistence
       stateJson = serializeState newState;
@@ -76,7 +147,8 @@ in rec {
       frame = ui.render.renderFrame {
         inherit cpuMetrics memMetrics netMetrics diskMetrics procMetrics tempMetrics batteryMetrics;
         inherit width height theme;
-        selectedPid = selectedPid;
+        selectedPid = resolvedSelectedPid;
+        processScrollOffset = clampedScrollOffset;
       };
       
       # Add header
@@ -86,10 +158,10 @@ in rec {
       helpOverlay = if showHelp then ui.render.renderHelp { inherit width height theme; } else "";
       
       # Process details overlay if process selected
-      selectedProcess = if selectedPid != null 
-        then utils.find (p: p.pid == selectedPid) (procMetrics.processes or [])
+      selectedProcess = if resolvedSelectedPid != null 
+        then utils.find (p: p.pid == resolvedSelectedPid) (procMetrics.processes or [])
         else null;
-      processDetailsOverlay = if selectedProcess != null && !showHelp
+      processDetailsOverlay = if selectedProcess != null && showProcessDetails && !showHelp
         then ui.render.renderProcessDetails { 
           process = selectedProcess; 
           inherit width height theme; 

@@ -35,37 +35,26 @@ rec {
   stripAnsi = str:
     let
       len = builtins.stringLength str;
+      isEsc = c: c == "\x1b";
       # Simple state machine to remove escape sequences
       process = idx: inEscape: acc:
         if idx >= len then acc
         else let
           char = builtins.substring idx 1 str;
-          isEsc = char == "";  # ESC character (won't match plain strings)
-          # Check for ESC [ sequence start
-          nextTwo = builtins.substring idx 2 str;
-          startsEscape = builtins.substring 0 1 nextTwo == "" || 
-                        (builtins.stringLength nextTwo >= 2 && 
-                         builtins.substring 1 1 nextTwo == "[");
         in
           if inEscape then
             # In escape sequence, look for terminator (letter)
             if builtins.match "[a-zA-Z]" char != null
             then process (idx + 1) false acc
             else process (idx + 1) true acc
-          else if char == "" || (builtins.stringLength (builtins.substring idx 2 str) >= 2 &&
-                   builtins.substring idx 1 str == "\x1b")
+          else if isEsc char
           then process (idx + 1) true acc
           else process (idx + 1) false (acc + char);
     in process 0 false "";
 
   # Calculate visual length (excluding ANSI codes)
-  # For simplicity, we estimate based on escape sequence pattern
   visualLength = str:
-    let
-      # Remove common ANSI patterns: \x1b[...m
-      cleaned = builtins.replaceStrings ["\x1b"] [""] str;
-      # Count remaining after rough cleanup - this is an approximation
-    in builtins.stringLength str;
+    builtins.stringLength (stripAnsi str);
 
   # Truncate a string to max length with ellipsis
   # Note: This is not ANSI-aware - use with plain strings or pre-calculated widths
@@ -279,6 +268,10 @@ rec {
   sum = list:
     builtins.foldl' (a: b: a + b) 0 list;
 
+  # Reverse list
+  reverse = list:
+    builtins.foldl' (acc: item: [item] ++ acc) [] list;
+ 
   # Maximum of list
   max = list:
     if list == [] then 0

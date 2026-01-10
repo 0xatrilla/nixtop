@@ -10,6 +10,13 @@ let
   boxes = ui.boxes;
 
 in rec {
+  layout = {
+    headerHeight = 1;
+    topRowHeight = 8;
+    midRowHeight = 7;
+    infoBarHeight = 1;
+  };
+
   # ============================================================================
   # CPU Box
   # ============================================================================
@@ -131,13 +138,25 @@ in rec {
       # Interface line with rates - ensure consistent column alignment
       # Format: [ifName(6)] [↓] [rxRate(10)] [↑] [txRate(10)]
       # All values right-aligned in their columns for vertical alignment
-      ifNamePadded = utils.padRight 6 ifName;
-      rxRatePadded = utils.padLeft 10 rxRate;
-      txRatePadded = utils.padLeft 10 txRate;
-      rateContent = "${ifNamePadded} ↓ ${rxRatePadded}  ↑ ${txRatePadded}";
-      rateVisibleLen = 6 + 1 + 1 + 10 + 2 + 1 + 10;  # 6 + space + ↓ + space + 10 + 2 spaces + ↑ + space + 10
-      ratePadding = if innerWidth > rateVisibleLen then innerWidth - rateVisibleLen else 0;
-      rateLine = rateContent + utils.repeat ratePadding " ";
+      formatInterfaceLine = iface:
+        let
+          ifaceName = iface.name or "none";
+          ifaceRx = iface.rxRateStr or "0 B/s";
+          ifaceTx = iface.txRateStr or "0 B/s";
+          ifaceNamePadded = utils.padRight 6 ifaceName;
+          ifaceRxPadded = utils.padLeft 10 ifaceRx;
+          ifaceTxPadded = utils.padLeft 10 ifaceTx;
+          lineContent = "${ifaceNamePadded} ↓ ${ifaceRxPadded}  ↑ ${ifaceTxPadded}";
+          visibleLen = 6 + 1 + 1 + 10 + 2 + 1 + 10;
+          padding = if innerWidth > visibleLen then innerWidth - visibleLen else 0;
+        in lineContent + utils.repeat padding " ";
+
+      rateLine = formatInterfaceLine primary;
+
+      # Additional interfaces (exclude primary) - show up to two
+      otherInterfaces = builtins.filter (i: i.name != (primary.name or "")) interfaces;
+      extraInterfaces = utils.take 2 otherInterfaces;
+      extraLines = map formatInterfaceLine extraInterfaces;
       
       # Total bytes line (if space allows) - align columns with rate line
       # Format: [Total:(6)] [↓] [rxTotal(10)] [↑] [txTotal(10)]
@@ -164,12 +183,8 @@ in rec {
       graphVisibleLen = 3 + (2 * graphWidth);
       graphPadding = if innerWidth > graphVisibleLen then innerWidth - graphVisibleLen else 0;
       graphLine = "${ansi.fgGreen}↓${ansi.resetAll}${rxGraph} ${ansi.fgMagenta}↑${ansi.resetAll}${txGraph}${utils.repeat graphPadding " "}";
-      
-      # Show interface count if multiple interfaces
-      interfaceCount = builtins.length interfaces;
-      countLine = if interfaceCount > 1 then "Interfaces: ${toString interfaceCount}" else "";
-      
-      content = builtins.filter (l: l != "") [rateLine totalLine graphLine countLine];
+
+      content = builtins.filter (l: l != "") ([rateLine] ++ extraLines ++ [totalLine graphLine]);
       
     in boxes.box {
       inherit content width;
@@ -189,6 +204,7 @@ in rec {
       
       innerWidth = width - 2;  # Account for box borders
       mounts = diskMetrics.mounts or [];
+      totalIO = diskMetrics.totalIO or { readRateStr = "0 B/s"; writeRateStr = "0 B/s"; };
       
       # Render each mount point - optimized layout for narrow boxes
       # First, calculate consistent widths for all mounts
@@ -235,7 +251,9 @@ in rec {
           
         in line;
       
-      content = map renderMount (utils.take 4 mounts);  # Max 4 disks
+      ioLine = utils.truncate innerWidth "I/O: ↓ ${totalIO.readRateStr}  ↑ ${totalIO.writeRateStr}";
+
+      content = (map renderMount (utils.take 4 mounts)) ++ [ioLine];  # Max 4 disks
       
     in boxes.box {
       inherit content width;
@@ -249,11 +267,11 @@ in rec {
   # Process Box
   # ============================================================================
   
-  renderProcessBox = { procMetrics, width, height ? 10, theme, selectedPid ? null }:
+  renderProcessBox = { procMetrics, width, height ? 10, theme, selectedPid ? null, scrollOffset ? 0 }:
     let
       themeColors = themes.getTheme theme;
       
-      processes = procMetrics.processes or [];
+      formatted = procMetrics.formatted or [];
       header = procMetrics.header or "PID     USER     CPU%  MEM%  NAME";
       
       # Format header with colors
@@ -262,20 +280,22 @@ in rec {
       # Separator
       separator = utils.repeat (width - 4) "─";
       
-      # Format process lines
+      maxProcs = if height > 4 then height - 4 else 0;  # Account for header, separator, borders
+      maxScroll = utils.max [0 ((builtins.length formatted) - maxProcs)];
+      safeScroll = utils.clamp 0 maxScroll scrollOffset;
+      
+      visible = utils.take maxProcs (utils.drop safeScroll formatted);
+      padCount = maxProcs - builtins.length visible;
+      padding = if padCount > 0 then builtins.genList (_: "") padCount else [];
+      
       formatProc = proc:
         let
-          f = procMetrics.formatted or [];
-          matching = utils.find (x: x.pid == utils.padLeft 7 (toString proc.pid)) f;
-          isSelected = selectedPid != null && proc.pid == selectedPid;
-          highlight = if isSelected then "${ansi.reverseVideo}" else "";
+          isSelected = selectedPid != null && (proc.pidValue or 0) == selectedPid;
+          highlight = if isSelected then "${ansi.reverse}" else "";
           reset = if isSelected then "${ansi.resetAll}" else "";
-        in if matching != null 
-           then "${highlight}${matching.line}${reset}"
-           else "${highlight}${utils.padLeft 7 (toString proc.pid)} ${utils.padRight 8 (proc.user or "?")} ${utils.padLeft 5 (toString (utils.round 1 (proc.cpuPercent or 0)))} ${utils.padLeft 5 (toString (utils.round 1 (proc.memPercent or 0)))}  ${utils.truncate 30 (proc.name or "?")}${reset}";
+        in "${highlight}${proc.line}${reset}";
       
-      maxProcs = height - 4;  # Account for header, separator, borders
-      procLines = map formatProc (utils.take maxProcs processes);
+      procLines = (map formatProc visible) ++ padding;
       
       # Add filter indicator if filtering
       filterIndicator = if procMetrics.filtered or false then " (filtered)" else "";
@@ -300,12 +320,16 @@ in rec {
         "PID:     ${toString (process.pid or 0)}"
         "Name:    ${process.name or "unknown"}"
         "User:    ${process.user or "unknown"}"
+        "State:   ${process.state or "?"}"
         "CPU%:    ${toString (utils.round 2 (process.cpuPercent or 0))}%"
         "MEM%:    ${toString (utils.round 2 (process.memPercent or 0))}%"
+        "Memory:  ${utils.formatBytes ((process.memoryKb or 0) * 1024)}"
         "CPU Time: ${toString (process.cpuTime or 0)}"
+        ""
+        "Cmd: ${utils.truncate 52 (process.command or process.name or "") }"
       ];
       
-      boxWidth = 40;
+      boxWidth = 60;
       boxHeight = builtins.length details + 2;
       leftPad = (width - boxWidth) / 2;
       topPad = (height - boxHeight) / 2;
@@ -368,7 +392,8 @@ in rec {
     width, 
     height, 
     theme ? "default",
-    selectedPid ? null
+    selectedPid ? null,
+    processScrollOffset ? 0
   }:
     let
       themeColors = themes.getTheme theme;
@@ -386,9 +411,9 @@ in rec {
       procWidth = width;
       
       # Calculate heights
-      topRowHeight = 8;
-      midRowHeight = 5;
-      procHeight = height - topRowHeight - midRowHeight - 2;
+      topRowHeight = layout.topRowHeight;
+      midRowHeight = layout.midRowHeight;
+      procHeight = height - topRowHeight - midRowHeight - layout.headerHeight - layout.infoBarHeight;
       
       # Render individual boxes
       cpuBox = renderCpuBox { 
@@ -415,7 +440,8 @@ in rec {
         inherit procMetrics theme;
         width = procWidth;
         height = procHeight;
-        selectedPid = null;  # TODO: Pass from render function
+        selectedPid = selectedPid;
+        scrollOffset = processScrollOffset;
       };
       
       # Info bar at bottom
@@ -512,13 +538,19 @@ in rec {
         "  +, =      - Increase refresh rate"
         "  -, _      - Decrease refresh rate"
         "  t         - Cycle themes"
+        "  e         - Edit config"
         "  s         - Cycle sort (CPU/MEM/PID/NAME)"
+        "  r         - Toggle sort order"
         "  f         - Clear process filter"
+        "  ↑/↓       - Move process selection"
+        "  Enter     - Toggle process details"
         "  k         - Kill selected process"
         "  h, ?      - Toggle this help"
         ""
         "Process Filtering:"
         "  Type process name to filter (case-insensitive)"
+        ""
+        "Mouse: scroll to move, click to select"
         ""
         "Themes: default, nord, gruvbox, dracula, monokai, solarized"
       ];

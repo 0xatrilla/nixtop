@@ -88,13 +88,18 @@ NIXMON_THEME=nord nixmon
 
 ### Configuration File
 
-Create `~/.config/nixmon/config` with:
+Create `~/.config/nixmon/nixmon.conf` (or `$XDG_CONFIG_HOME/nixmon/nixmon.conf`) with btop-style keys:
 
 ```
-theme=nord
-refresh=1.5
-sort=cpu
+color_theme = "nord"
+update_ms = 1500
+proc_sorting = "cpu"
+proc_reversed = false
+net_iface = "auto"
+disk_filter = ""
 ```
+
+`disk_filter` accepts a regex; prefix with `!` to exclude matches.
 
 ## Keyboard Shortcuts
 
@@ -102,16 +107,19 @@ sort=cpu
 - `+`, `=` - Increase refresh rate
 - `-`, `_` - Decrease refresh rate
 - `t` - Cycle themes
+- `e` - Edit config
 - `s` - Cycle sort key (CPU/MEM/PID/NAME)
+- `r` - Toggle sort order
 - `f` - Clear process filter
+- `↑`/`↓` - Move process selection
+- `Enter`, `i` - Toggle process details
 - `k` - Kill selected process
 - `h`, `?` - Toggle help overlay
-- Arrow keys - Navigate process list (when implemented)
 
 ## Mouse Support
 
 - Scroll wheel - Scroll process list
-- Click - Select process (when implemented)
+- Click - Select process
 
 ## Additional Commands
 

@@ -78,7 +78,7 @@ rec {
   # Main Network Metrics Function
   # ============================================================================
   
-  getMetrics = { prevState ? {}, interval ? 2 }:
+  getMetrics = { prevState ? {}, interval ? 2, preferredInterface ? "auto" }:
     let
       # Get raw data from platform
       netInfo = platform.getNetworkInfo;
@@ -88,14 +88,28 @@ rec {
       prevHistory = prevState.netHistory or { rx = []; tx = []; };
       
       # Calculate speeds
-      interfaces = calculateSpeeds {
+      interfacesRaw = calculateSpeeds {
         currentData = netInfo;
         prevData = prevNetData;
         inherit interval;
       };
+
+      dedupeInterfaces = list:
+        builtins.foldl' (acc: iface:
+          if builtins.any (existing: existing.name == iface.name) acc
+          then acc
+          else acc ++ [iface]
+        ) [] list;
+
+      interfaces = dedupeInterfaces interfacesRaw;
       
-      # Find primary interface (first non-loopback with traffic)
-      primary = utils.find (i: i.rxBytes > 0 || i.txBytes > 0) interfaces;
+      # Find preferred interface (by name) or fall back to first active
+      preferred = if preferredInterface != "auto"
+                  then getInterface preferredInterface interfaces
+                  else null;
+      primary = if preferred != null
+                then preferred
+                else utils.find (i: i.rxBytes > 0 || i.txBytes > 0) interfaces;
       primaryInterface = if primary != null then primary
                         else if interfaces != [] then builtins.head interfaces
                         else {

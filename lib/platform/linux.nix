@@ -255,72 +255,67 @@ rec {
       # Filter to only numeric (PID) directories
       isNumeric = s: builtins.match "[0-9]+" s != null;
       pidDirs = builtins.filter isNumeric (builtins.attrNames entries);
+      pidNums = map utils.parseInt pidDirs;
+      sortedPidNums = utils.sortBy (a: b: if a < b then -1 else if a > b then 1 else 0) pidNums;
+      sortedPidDirs = map toString sortedPidNums;
       
       # Read process info for a single PID
       readProcess = pid:
         let
           statContent = readFileSafe "/proc/${pid}/stat";
-          statusContent = readFileSafe "/proc/${pid}/status";
-          cmdlineContent = readFileSafe "/proc/${pid}/cmdline";
-          
-          # Parse stat file
-          # Format: pid (comm) state ppid pgrp session tty_nr tpgid flags minflt cminflt majflt cmajflt utime stime ...
-          statParts = utils.split " " statContent;
-          
-          # Extract command name (between parentheses)
-          commStart = builtins.stringLength (builtins.elemAt statParts 0) + 2;
-          commEnd = builtins.stringLength statContent - commStart;
-          
-          # Find the closing paren
-          findCloseParen = start: idx:
-            if idx >= builtins.stringLength statContent then start
-            else if builtins.substring idx 1 statContent == ")" then idx
-            else findCloseParen start (idx + 1);
-          
-          name = if builtins.length statParts >= 2 
-                 then let raw = builtins.elemAt statParts 1;
-                          len = builtins.stringLength raw;
-                      in if len > 2 && builtins.substring 0 1 raw == "("
-                         then builtins.substring 1 (len - 2) raw
-                         else raw
-                 else "unknown";
-          
-          state = if builtins.length statParts >= 3 then builtins.elemAt statParts 2 else "?";
-          
-          # utime and stime are at indices 13 and 14 (0-indexed)
-          utime = if builtins.length statParts >= 14 then utils.parseInt (builtins.elemAt statParts 13) else 0;
-          stime = if builtins.length statParts >= 15 then utils.parseInt (builtins.elemAt statParts 14) else 0;
-          
-          # Parse status file for memory and user info
-          statusLines = utils.split "\n" statusContent;
-          
-          findValue = prefix:
+        in if statContent == "" then null else
+          let
+            # Parse stat file using a regex to avoid splitting the comm field
+            # Format: pid (comm) state ppid pgrp session tty_nr tpgid flags minflt cminflt majflt cmajflt utime stime ...
+            statMatch = builtins.match "^[0-9]+ \((.*)\) ([A-Za-z]) (.*)$" statContent;
+          in if statMatch == null then null else
             let
-              matching = utils.find (l: utils.contains prefix l) statusLines;
-            in if matching == null then "0"
-               else let parts = utils.split ":" matching;
-                    in if builtins.length parts >= 2 
-                       then utils.trim (builtins.elemAt parts 1)
-                       else "0";
-          
-          uid = utils.parseInt (builtins.head (utils.split "\t" (findValue "Uid:")));
-          vmRss = utils.parseInt (builtins.head (utils.split " " (findValue "VmRSS:")));
-          
-          # Clean up cmdline
-          cmdline = builtins.replaceStrings ["\x00"] [" "] cmdlineContent;
-          
-        in {
-          pid = utils.parseInt pid;
-          inherit name state uid;
-          cpuTime = utime + stime;
-          memoryKb = vmRss;
-          command = if cmdline == "" then name else utils.trim cmdline;
-        };
+              statusContent = readFileSafe "/proc/${pid}/status";
+              cmdlineContent = readFileSafe "/proc/${pid}/cmdline";
+              name = builtins.elemAt statMatch 0;
+              state = builtins.elemAt statMatch 1;
+              rest = builtins.elemAt statMatch 2;
+              restParts = builtins.filter (p: p != "") (utils.split " " rest);
+
+              # utime and stime are fields 14 and 15 overall, index 10/11 in the rest section
+              utime = if builtins.length restParts > 10 then utils.parseInt (builtins.elemAt restParts 10) else 0;
+              stime = if builtins.length restParts > 11 then utils.parseInt (builtins.elemAt restParts 11) else 0;
+
+              # Parse status file for memory and user info
+              statusLines = if statusContent == "" then [] else utils.split "\n" statusContent;
+
+              findValue = prefix:
+                let
+                  matching = utils.find (l: utils.contains prefix l) statusLines;
+                in if matching == null then "0"
+                   else let parts = utils.split ":" matching;
+                        in if builtins.length parts >= 2 
+                           then utils.trim (builtins.elemAt parts 1)
+                           else "0";
+
+              uidLine = findValue "Uid:";
+              vmRssLine = findValue "VmRSS:";
+
+              uid = if uidLine == "0" then 0
+                    else utils.parseInt (builtins.head (utils.split "\t" uidLine));
+              vmRss = if vmRssLine == "0" then 0
+                      else utils.parseInt (builtins.head (utils.split " " vmRssLine));
+
+              # Clean up cmdline
+              cmdline = builtins.replaceStrings ["\x00"] [" "] cmdlineContent;
+
+            in {
+              pid = utils.parseInt pid;
+              inherit name state uid;
+              cpuTime = utime + stime;
+              memoryKb = vmRss;
+              command = if cmdline == "" then name else utils.trim cmdline;
+            };
       
       # Read all processes (limit to avoid performance issues)
       processes = map readProcess (utils.take 200 pidDirs);
       
-    in builtins.filter (p: p.name != "unknown") processes;
+    in builtins.filter (p: p != null) processes;
 
   # ============================================================================
   # Temperature

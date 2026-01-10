@@ -135,23 +135,17 @@ rec {
       
       # Format content lines
       # Lines may contain ANSI escape codes, making string length > visual width
-      # Strategy: Estimate visual width and pad to innerWidth
+      # Use ANSI-aware length to pad correctly.
       formatLine = line:
         let
-          lineLen = builtins.stringLength line;
-          # If line is longer than innerWidth, it likely has ANSI codes
-          # Estimate: fgHex (RGB) = ~20-22 chars, resetAll = ~4 chars, total ~24-26 chars for a progress bar
-          # Use 25 as a conservative estimate
-          hasAnsiCodes = lineLen > innerWidth + 10;
-          estimatedAnsiOverhead = if hasAnsiCodes then 25 else 0;
-          estimatedVisualWidth = lineLen - estimatedAnsiOverhead;
-          # Pad to ensure visual width is exactly innerWidth
-          # Be more precise: pad the exact difference needed
-          paddingNeeded = if estimatedVisualWidth < innerWidth
-                          then innerWidth - estimatedVisualWidth 
+          visualLen = utils.visualLength line;
+          paddingNeeded = if visualLen < innerWidth
+                          then innerWidth - visualLen
                           else 0;
           padded = line + utils.repeat paddingNeeded " ";
         in chars.vertical + padded + chars.vertical;
+
+
       
       # Title handling
       titleStr = if title == null then ""
@@ -354,19 +348,14 @@ rec {
       # Format content lines (account for ANSI codes)
       formatLine = line:
         let
-          lineLen = builtins.stringLength line;
-          # Estimate visual width: if line is longer than innerWidth, it has ANSI codes
-          # Typical ANSI codes for colored content: ~25 chars
-          # (fgHex RGB color ~20-22 chars + resetAll ~4 chars)
-          hasAnsiCodes = lineLen > innerWidth + 10;
-          estimatedAnsiOverhead = if hasAnsiCodes then 25 else 0;
-          estimatedVisualWidth = lineLen - estimatedAnsiOverhead;
-          # Pad to ensure visual width is exactly innerWidth
-          paddingNeeded = if estimatedVisualWidth < innerWidth 
-                          then innerWidth - estimatedVisualWidth 
+          visualLen = utils.visualLength line;
+          paddingNeeded = if visualLen < innerWidth
+                          then innerWidth - visualLen
                           else 0;
           padded = line + utils.repeat paddingNeeded " ";
         in chars.vertical + padded + chars.vertical;
+
+
       
       # Title bar
       makeTitle = title:

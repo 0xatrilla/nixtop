@@ -104,27 +104,126 @@ in stdenv.mkDerivation rec {
     # Interactivity state
     PROCESS_FILTER=""
     SORT_KEY="cpu"
+    PROCESS_SORT_REVERSED=false
     SELECTED_PID=""
+    PROCESS_SELECTION_INDEX=0
     SHOW_HELP=false
+    SHOW_DETAILS=false
     PROCESS_SCROLL_OFFSET=0
     MAX_PROCESS_SCROLL=0
+    PREFERRED_NET_IFACE="auto"
+    DISK_FILTER=""
+
+    HEADER_HEIGHT=1
+    TOP_ROW_HEIGHT=8
+    MID_ROW_HEIGHT=7
+    INFO_BAR_HEIGHT=1
+    PROCESS_MAX_ROWS=0
+    PROCESS_LIST_START=0
     
-    # Load configuration file
-    CONFIG_FILE="$HOME/.config/nixmon/config"
-    if [ -f "$CONFIG_FILE" ]; then
-      while IFS='=' read -r key value; do
-        case "$key" in
-          theme) THEME="$value" ;;
-          refresh) REFRESH_RATE="$value" ;;
-          sort) SORT_KEY="$value" ;;
-        esac
-      done < "$CONFIG_FILE" 2>/dev/null || true
-    fi
+    # Configuration file handling
+    CONFIG_DIR="''${XDG_CONFIG_HOME:-$HOME/.config}/nixmon"
+    CONFIG_FILE="$CONFIG_DIR/nixmon.conf"
+
+    ensure_config() {
+      if [ ! -d "$CONFIG_DIR" ]; then
+        mkdir -p "$CONFIG_DIR" 2>/dev/null || true
+      fi
+      if [ ! -f "$CONFIG_FILE" ]; then
+        cat > "$CONFIG_FILE" <<'EOF'
+    # btop-compatible config keys
+    color_theme = "default"
+    update_ms = 2000
+    proc_sorting = "cpu"
+    proc_reversed = false
+    net_iface = "auto"
+    disk_filter = ""
+    EOF
+      fi
+    }
+
+    parse_bool() {
+      case "$1" in
+        true|True|TRUE|1|yes|on) echo "true" ;;
+        *) echo "false" ;;
+      esac
+    }
+
+    load_config() {
+      if [ -f "$CONFIG_FILE" ]; then
+        while IFS= read -r line; do
+          line=$(printf '%s' "$line" | sed 's/#.*$//')
+          [ -z "$line" ] && continue
+          IFS='=' read -r key value <<EOF
+    $line
+    EOF
+          key=$(printf '%s' "$key" | sed 's/[[:space:]]//g')
+          value=$(printf '%s' "$value" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+          value=$(printf '%s' "$value" | sed 's/^"//;s/"$//')
+          case "$key" in
+            "") continue ;;
+            color_theme) THEME="$value" ;;
+            update_ms)
+              if [ -n "$value" ]; then
+                REFRESH_RATE=$(echo "$value" | awk '{ms=$1; if(ms<100) ms=100; printf "%.1f", ms/1000}')
+              fi
+              ;;
+            proc_sorting)
+              case "$value" in
+                cpu) SORT_KEY="cpu" ;;
+                memory|mem) SORT_KEY="mem" ;;
+                pid) SORT_KEY="pid" ;;
+                name|command) SORT_KEY="name" ;;
+              esac
+              ;;
+            proc_reversed) PROCESS_SORT_REVERSED=$(parse_bool "$value") ;;
+            net_iface) PREFERRED_NET_IFACE="$value" ;;
+            disk_filter) DISK_FILTER="$value" ;;
+          esac
+        done < "$CONFIG_FILE" 2>/dev/null || true
+      fi
+    }
+
+    ensure_config
+    load_config
     
     # Terminal state management
-    save_terminal() { printf '\e[s'; }
+    save_terminal() {
+      printf '\e[s'
+      STTY_STATE=$(stty -g < /dev/tty 2>/dev/null || echo "")
+    }
     restore_terminal() {
+      if [ -n "$STTY_STATE" ]; then
+        stty "$STTY_STATE" < /dev/tty 2>/dev/null || true
+      fi
       printf '\e[?1000l\e[?1003l\e[?1006l\e[?1049l\e[u\e[?25h\e[0m' 2>/dev/null || true
+    }
+    setup_terminal() {
+      printf '\e[?1049h\e[?1006h\e[?1003h\e[?1000h' 2>/dev/null || true
+      stty raw -echo -ixon < /dev/tty 2>/dev/null || true
+      printf '\e[?25l\e[2J\e[H' 2>/dev/null || true
+    }
+    edit_config() {
+      ensure_config
+      restore_terminal
+
+      local editor=""
+      if [ -n "''${EDITOR:-}" ] && command -v "$EDITOR" >/dev/null 2>&1; then
+        editor="$EDITOR"
+      elif [ -n "''${VISUAL:-}" ] && command -v "$VISUAL" >/dev/null 2>&1; then
+        editor="$VISUAL"
+      elif command -v nano >/dev/null 2>&1; then
+        editor="nano"
+      elif command -v vi >/dev/null 2>&1; then
+        editor="vi"
+      fi
+
+      if [ -n "$editor" ]; then
+        "$editor" "$CONFIG_FILE"
+      fi
+
+      setup_terminal
+      load_config
     }
     cleanup() {
       RUNNING=false
@@ -141,7 +240,7 @@ in stdenv.mkDerivation rec {
     
     # Setup terminal
     save_terminal
-    printf '\e[?1049h\e[?1006h\e[?1003h\e[?1000h\e[?25l\e[2J\e[H' 2>/dev/null || true
+    setup_terminal
     
     # Get dimensions
     get_dimensions() {
@@ -154,8 +253,19 @@ in stdenv.mkDerivation rec {
       [ "$COLS" -lt 80 ] && COLS=80
       [ "$LINES" -lt 24 ] && LINES=24
     }
+
+    calculate_layout() {
+      local rows
+      rows=$((LINES - TOP_ROW_HEIGHT - MID_ROW_HEIGHT - HEADER_HEIGHT - INFO_BAR_HEIGHT - 4))
+      if [ "$rows" -lt 0 ]; then
+        rows=0
+      fi
+      PROCESS_MAX_ROWS=$rows
+      PROCESS_LIST_START=$((HEADER_HEIGHT + 1 + TOP_ROW_HEIGHT + MID_ROW_HEIGHT + 3))
+    }
     
     get_dimensions
+    calculate_layout
     echo '{}' > "$STATE_FILE"
     STATIC_DATA_CACHE="/tmp/nixmon-static-$$.json"
     CACHE_TIMESTAMP=0
@@ -175,29 +285,118 @@ in stdenv.mkDerivation rec {
     # Mouse event parsing (simplified)
     parse_mouse_event() {
       local seq="$1"
-      if echo "$seq" | grep -qE '^\e\[<[0-9]+;[0-9]+;[0-9]+[Mm]$'; then
-        local cleaned=$(echo "$seq" | sed 's/^\e\[<//' | sed 's/[Mm]$//')
-        local action_type=$(echo "$cleaned" | cut -d';' -f1)
-        if [ "$action_type" -ge 64 ] && [ "$action_type" -le 97 ]; then
-          [ "$action_type" -eq 64 ] || [ "$action_type" -eq 96 ] && [ "$PROCESS_SCROLL_OFFSET" -gt 0 ] && PROCESS_SCROLL_OFFSET=$((PROCESS_SCROLL_OFFSET - 1))
-          [ "$action_type" -eq 65 ] || [ "$action_type" -eq 97 ] && [ "$PROCESS_SCROLL_OFFSET" -lt "$MAX_PROCESS_SCROLL" ] && PROCESS_SCROLL_OFFSET=$((PROCESS_SCROLL_OFFSET + 1))
-        fi
+      local button x y action_type
+      if [[ "$seq" == *$'\e[<'* ]]; then
+        local rest="''${seq#*$'\e[<'}"
+        local payload="''${rest%%[mM]*}"
+        local terminator="''${rest#''${payload}}"
+        terminator="''${terminator:0:1}"
+        [ -z "$payload" ] && return 1
+        button="''${payload%%;*}"
+        local remainder="''${payload#*;}"
+        x="''${remainder%%;*}"
+        y="''${remainder#*;}"
+        action_type=$button
+      elif [[ "$seq" == *$'\e[M'* ]]; then
+        local tail="''${seq#*$'\e[M'}"
+        local button_char="''${tail:0:1}"
+        local x_char="''${tail:1:1}"
+        local y_char="''${tail:2:1}"
+        button=$(printf '%d' "'$button_char")
+        x=$(printf '%d' "'$x_char")
+        y=$(printf '%d' "'$y_char")
+        action_type=$((button - 32))
+        x=$((x - 32))
+        y=$((y - 32))
+      else
+        return 1
+      fi
+
+      if [ "$action_type" -ge 64 ] && [ "$action_type" -le 97 ]; then
+        [ "$action_type" -eq 64 ] || [ "$action_type" -eq 96 ] && [ "$PROCESS_SCROLL_OFFSET" -gt 0 ] && PROCESS_SCROLL_OFFSET=$((PROCESS_SCROLL_OFFSET - 1))
+        [ "$action_type" -eq 65 ] || [ "$action_type" -eq 97 ] && [ "$PROCESS_SCROLL_OFFSET" -lt "$MAX_PROCESS_SCROLL" ] && PROCESS_SCROLL_OFFSET=$((PROCESS_SCROLL_OFFSET + 1))
         return 0
       fi
-      return 1
+      if [ "$action_type" -lt 64 ]; then
+        if [ "$SHOW_HELP" = "false" ] && [ "$SHOW_DETAILS" = "false" ] && [ -n "$y" ] && [ "$y" -ge "$PROCESS_LIST_START" ]; then
+          local row=$((y - PROCESS_LIST_START))
+          if [ "$row" -ge 0 ] && [ "$row" -lt "$PROCESS_MAX_ROWS" ]; then
+            PROCESS_SELECTION_INDEX="$row"
+          fi
+        fi
+      fi
+      return 0
     }
-    
+
+    move_selection_up() {
+      if [ "$PROCESS_MAX_ROWS" -le 0 ]; then
+        return
+      fi
+      if [ "$PROCESS_SELECTION_INDEX" -gt 0 ]; then
+        PROCESS_SELECTION_INDEX=$((PROCESS_SELECTION_INDEX - 1))
+      elif [ "$PROCESS_SCROLL_OFFSET" -gt 0 ]; then
+        PROCESS_SCROLL_OFFSET=$((PROCESS_SCROLL_OFFSET - 1))
+      fi
+    }
+
+    move_selection_down() {
+      if [ "$PROCESS_MAX_ROWS" -le 0 ]; then
+        return
+      fi
+      local max_index=$((PROCESS_MAX_ROWS - 1))
+      if [ "$PROCESS_SELECTION_INDEX" -lt "$max_index" ]; then
+        PROCESS_SELECTION_INDEX=$((PROCESS_SELECTION_INDEX + 1))
+      elif [ "$PROCESS_SCROLL_OFFSET" -lt "$MAX_PROCESS_SCROLL" ]; then
+        PROCESS_SCROLL_OFFSET=$((PROCESS_SCROLL_OFFSET + 1))
+      fi
+    }
+
+    move_selection_page() {
+      local direction="$1"
+      local step=5
+      local i
+      for i in $(seq 1 "$step"); do
+        if [ "$direction" = "up" ]; then
+          move_selection_up
+        else
+          move_selection_down
+        fi
+      done
+    }
+
     # Input handling (simplified - full version in flake.nix)
     check_input() {
-      [ -t 0 ] || return 1
+
+      [ -r /dev/tty ] || return 1
       local input=""
-      IFS= read -t 0 -r -n 20 input 2>/dev/null || return 1
+      IFS= read -t 0.05 -r -n 1 -s input < /dev/tty 2>/dev/null || return 1
       [ -z "$input" ] && return 1
+
+      local extra=""
+      while IFS= read -t 0.005 -r -n 1 -s extra < /dev/tty 2>/dev/null; do
+        input="$input$extra"
+      done
       
-      if echo "$input" | grep -q '^\e\['; then
-        echo "$input" | grep -qE '^\e\[<[0-9]+;[0-9]+;[0-9]+[Mm]$' && parse_mouse_event "$input" && return 0
-        echo "$input" | grep -qE '^\e\[M.' && parse_mouse_event "$input" && return 0
-        [ "$input" = $'\e' ] && RUNNING=false && return 0
+      if [[ "$input" == *$'\e['* ]]; then
+        if [[ "$input" == *$'\e[<'* ]] || [[ "$input" == *$'\e[M'* ]]; then
+          parse_mouse_event "$input" && return 0
+        fi
+        if [ "$input" = $'\e[A' ]; then
+          move_selection_up
+          return 0
+        elif [ "$input" = $'\e[B' ]; then
+          move_selection_down
+          return 0
+        elif [ "$input" = $'\e[5~' ]; then
+          move_selection_page up
+          return 0
+        elif [ "$input" = $'\e[6~' ]; then
+          move_selection_page down
+          return 0
+        elif [ "$input" = $'\e' ] || [ "$input" = $'\e[' ]; then
+          RUNNING=false
+          return 0
+        fi
         return 0
       fi
       
@@ -206,12 +405,30 @@ in stdenv.mkDerivation rec {
         +|=) REFRESH_RATE=$(echo "$REFRESH_RATE" | awk '{new=$1-0.1; if(new<0.1) new=0.1; printf "%.1f", new}'); return 0 ;;
         -|_) REFRESH_RATE=$(echo "$REFRESH_RATE" | awk '{new=$1+0.1; if(new>10) new=10; printf "%.1f", new}'); return 0 ;;
         t|T) case "$THEME" in default) THEME=nord ;; nord) THEME=gruvbox ;; gruvbox) THEME=dracula ;; dracula) THEME=monokai ;; monokai) THEME=solarized ;; *) THEME=default ;; esac; return 0 ;;
+        e|E) edit_config; return 0 ;;
         s|S) case "$SORT_KEY" in cpu) SORT_KEY=mem ;; mem) SORT_KEY=pid ;; pid) SORT_KEY=name ;; *) SORT_KEY=cpu ;; esac; return 0 ;;
+        r|R) PROCESS_SORT_REVERSED=$([ "$PROCESS_SORT_REVERSED" = true ] && echo false || echo true); return 0 ;;
+        $'\n'|$'\r') SHOW_DETAILS=$([ "$SHOW_DETAILS" = true ] && echo false || echo true); return 0 ;;
+        i|I) SHOW_DETAILS=$([ "$SHOW_DETAILS" = true ] && echo false || echo true); return 0 ;;
         f|F) [ -n "$PROCESS_FILTER" ] && PROCESS_FILTER="" || PROCESS_FILTER=""; return 0 ;;
         k|K) [ -n "$SELECTED_PID" ] && kill -TERM "$SELECTED_PID" 2>/dev/null || true; SELECTED_PID=""; return 0 ;;
         h|H|?) SHOW_HELP=$([ "$SHOW_HELP" = true ] && echo false || echo true); return 0 ;;
       esac
       return 1
+    }
+
+    extract_state_number() {
+      local key="$1"
+      local json="$2"
+      local value=""
+      value=$(printf '%s' "$json" | sed -n "s/.*\"$key\":\([0-9]*\).*/\1/p" | head -n 1)
+      if [ -n "$value" ]; then
+        printf '%s' "$value"
+      fi
+    }
+
+    escape_nix_string() {
+      printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
     }
     
     # Platform data collection (simplified - see flake.nix for full version)
@@ -246,12 +463,17 @@ in stdenv.mkDerivation rec {
     # Main loop
     while [ "$RUNNING" = true ]; do
       set +e; get_dimensions; set -e
+      calculate_layout
       check_input || true
       collect_static_data
       ${if isDarwin then "collect_darwin_data" else "collect_linux_data"}
       
       ERR_FILE="/tmp/nixmon-error-$$.txt"
       OUTPUT=""
+      ESCAPED_PROCESS_FILTER=$(escape_nix_string "$PROCESS_FILTER")
+      ESCAPED_SORT_KEY=$(escape_nix_string "$SORT_KEY")
+      ESCAPED_PREFERRED_NET_IFACE=$(escape_nix_string "$PREFERRED_NET_IFACE")
+      ESCAPED_DISK_FILTER=$(escape_nix_string "$DISK_FILTER")
       if OUTPUT=$(${nix}/bin/nix eval --raw --impure \
         --expr "let
           pkgs = import ${nixpkgsPath} { system = \"${stdenv.system}\"; };
@@ -262,10 +484,16 @@ in stdenv.mkDerivation rec {
           height = $LINES;
           theme = \"$THEME\";
           stateFile = \"$STATE_FILE\";
-          processFilter = \"$PROCESS_FILTER\";
-          sortKey = \"$SORT_KEY\";
-          showHelp = $(if [ "$SHOW_HELP" = true ]; then echo "true"; else echo "false"; fi);
-          selectedPid = $(if [ -n "$SELECTED_PID" ]; then echo "$SELECTED_PID"; else echo "null"; fi);
+          processFilter = \"$ESCAPED_PROCESS_FILTER\";
+          sortKey = \"$ESCAPED_SORT_KEY\";
+          sortReversed = $(if [ \"$PROCESS_SORT_REVERSED\" = true ]; then echo true; else echo false; fi);
+          processScrollOffset = $PROCESS_SCROLL_OFFSET;
+          processSelectionIndex = $PROCESS_SELECTION_INDEX;
+          showHelp = $(if [ \"$SHOW_HELP\" = true ]; then echo true; else echo false; fi);
+          showProcessDetails = $(if [ \"$SHOW_DETAILS\" = true ]; then echo true; else echo false; fi);
+          selectedPid = $(if [ -n \"$SELECTED_PID\" ]; then echo \"$SELECTED_PID\"; else echo null; fi);
+          preferredNetInterface = \"$ESCAPED_PREFERRED_NET_IFACE\";
+          diskFilter = \"$ESCAPED_DISK_FILTER\";
         }" \
         2>"$ERR_FILE" 2>&1); then
         rm -f "$ERR_FILE" "/tmp/nixmon-error-shown-$$"
@@ -296,6 +524,35 @@ in stdenv.mkDerivation rec {
       
       echo "$FRAME_LINES" > "$PREV_FRAME_LINES_FILE"
       [ -n "$STATE_JSON" ] && [ "$(printf '%s' "$STATE_JSON" | head -c 1)" = "{" ] && printf '%s' "$STATE_JSON" > "$STATE_FILE"
+
+      if [ -n "$STATE_JSON" ]; then
+        NEW_MAX_ROWS=$(extract_state_number "processMaxRows" "$STATE_JSON")
+        if [ -n "$NEW_MAX_ROWS" ]; then
+          PROCESS_MAX_ROWS="$NEW_MAX_ROWS"
+        fi
+        NEW_LIST_START=$(extract_state_number "processListStart" "$STATE_JSON")
+        if [ -n "$NEW_LIST_START" ]; then
+          PROCESS_LIST_START="$NEW_LIST_START"
+        fi
+        NEW_MAX_SCROLL=$(extract_state_number "processMaxScroll" "$STATE_JSON")
+        if [ -n "$NEW_MAX_SCROLL" ]; then
+          MAX_PROCESS_SCROLL="$NEW_MAX_SCROLL"
+        fi
+        NEW_SCROLL=$(extract_state_number "processScrollOffset" "$STATE_JSON")
+        if [ -n "$NEW_SCROLL" ]; then
+          PROCESS_SCROLL_OFFSET="$NEW_SCROLL"
+        fi
+        NEW_SELECTED_INDEX=$(extract_state_number "processSelectedIndex" "$STATE_JSON")
+        if [ -n "$NEW_SELECTED_INDEX" ]; then
+          PROCESS_SELECTION_INDEX="$NEW_SELECTED_INDEX"
+        fi
+        NEW_SELECTED_PID=$(extract_state_number "processSelectedPid" "$STATE_JSON")
+        if [ -n "$NEW_SELECTED_PID" ] && [ "$NEW_SELECTED_PID" -gt 0 ]; then
+          SELECTED_PID="$NEW_SELECTED_PID"
+        else
+          SELECTED_PID=""
+        fi
+      fi
       
       REFRESH_CENTIS=$(echo "$REFRESH_RATE" | awk '{printf "%.0f", $1 * 100}')
       SLEPT=0

@@ -86,16 +86,25 @@ rec {
   # Main Disk Metrics Function
   # ============================================================================
   
-  getMetrics = { prevState ? {}, interval ? 2 }:
+  getMetrics = { prevState ? {}, interval ? 2, mountFilter ? "" }:
     let
       # Get raw data from platform
       diskInfo = platform.getDiskInfo;
       
       mounts = diskInfo.mounts or [];
       stats = diskInfo.stats or [];
+
+      filteredMounts =
+        if mountFilter == "" then mounts
+        else
+          let
+            isNegated = builtins.substring 0 1 mountFilter == "!";
+            pattern = if isNegated then builtins.substring 1 ((builtins.stringLength mountFilter) - 1) mountFilter else mountFilter;
+            matches = m: (builtins.match pattern (m.mountPoint or "") != null);
+          in builtins.filter (m: if isNegated then !(matches m) else matches m) mounts;
       
       # Format mount points
-      formattedMounts = formatMounts mounts;
+      formattedMounts = formatMounts filteredMounts;
       
       # Calculate I/O rates if we have previous stats
       prevDiskStats = prevState.diskStats or [];

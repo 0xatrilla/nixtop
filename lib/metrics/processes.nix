@@ -75,6 +75,7 @@ rec {
       
     in {
       pid = pid;
+      pidValue = process.pid or 0;
       user = user;
       cpu = cpu;
       mem = mem;
@@ -125,7 +126,7 @@ rec {
           finalPct = if hasCpuPercent then p.cpuPercent else calculatedPct;
           
         in p // {
-          cpuPercent = utils.clamp 0 100 finalPct;
+          cpuPercent = utils.clamp 0 (100 * numCpus) finalPct;
           cpuTime = p.cpuTime or 0;
         };
       
@@ -154,7 +155,7 @@ rec {
   # Main Process Metrics Function
   # ============================================================================
   
-  getMetrics = { prevState ? {}, sortKey ? "cpu", maxProcesses ? 20, interval ? 2, processFilter ? "" }:
+  getMetrics = { prevState ? {}, sortKey ? "cpu", sortReversed ? false, maxProcesses ? null, interval ? 2, processFilter ? "" }:
     let
       # Get raw process list from platform
       rawProcesses = platform.getProcessList;
@@ -186,9 +187,10 @@ rec {
       userFiltered = filterUserProcesses withMemPct;
       nameFiltered = searchByName processFilter userFiltered;
       sorted = sortBy sortKey nameFiltered;
+      ordered = if sortReversed then utils.reverse sorted else sorted;
       
-      # Take top N
-      topProcesses = utils.take maxProcesses sorted;
+      # Take top N if requested (null means full list)
+      topProcesses = if maxProcesses == null then ordered else utils.take maxProcesses ordered;
       
       # Format for display
       formatted = map (p: formatProcess { process = p; }) topProcesses;
