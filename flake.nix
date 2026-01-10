@@ -48,6 +48,7 @@
           PROCESS_MAX_ROWS=0
           PROCESS_LIST_START=0
           INPUT_PENDING=false
+          INPUT_PENDING=false
           
           # Configuration file handling
           CONFIG_DIR="''${XDG_CONFIG_HOME:-$HOME/.config}/nixmon"
@@ -412,20 +413,26 @@
                 # Check if it's a mouse event
                 # SGR format: \e[<button;x;yM
                 if [[ "$input" == *$'\e[<'* ]] || [[ "$input" == *$'\e[M'* ]]; then
+                  INPUT_PENDING=true
                   parse_mouse_event "$input" && return 0
                 elif [ "$input" = $'\e[A' ]; then
+                  INPUT_PENDING=true
                   move_selection_up
                   return 0
                 elif [ "$input" = $'\e[B' ]; then
+                  INPUT_PENDING=true
                   move_selection_down
                   return 0
                 elif [ "$input" = $'\e[5~' ]; then
+                  INPUT_PENDING=true
                   move_selection_page up
                   return 0
                 elif [ "$input" = $'\e[6~' ]; then
+                  INPUT_PENDING=true
                   move_selection_page down
                   return 0
                 elif [ "$input" = $'\e' ] || [ "$input" = $'\e[' ]; then
+                  INPUT_PENDING=true
                   RUNNING=false
                   return 0
                 fi
@@ -435,21 +442,27 @@
               
               # Regular keyboard input
               case "$input" in
-                q|Q) RUNNING=false; return 0 ;;
-                +|=) 
-                  # Increase refresh rate (decrease interval) - min 0.1s
-                  NEW_RATE=$(echo "$REFRESH_RATE" | awk '{new=$1-0.1; if(new<0.1) new=0.1; printf "%.1f", new}')
-                  REFRESH_RATE="$NEW_RATE"
-                  return 0 
+                q|Q)
+                  # Quit
+                  INPUT_PENDING=true
+                  RUNNING=false
+                  return 0
                   ;;
-                -|_) 
-                  # Decrease refresh rate (increase interval) - max 10s
-                  NEW_RATE=$(echo "$REFRESH_RATE" | awk '{new=$1+0.1; if(new>10) new=10; printf "%.1f", new}')
-                  REFRESH_RATE="$NEW_RATE"
-                  return 0 
+                +|=)
+                  # Increase refresh rate
+                  INPUT_PENDING=true
+                  REFRESH_RATE=$(echo "$REFRESH_RATE" | awk '{new=$1-0.1; if(new<0.1) new=0.1; printf "%.1f", new}')
+                  return 0
+                  ;;
+                -|_)
+                  # Decrease refresh rate
+                  INPUT_PENDING=true
+                  REFRESH_RATE=$(echo "$REFRESH_RATE" | awk '{new=$1+0.1; if(new>10) new=10; printf "%.1f", new}')
+                  return 0
                   ;;
                 t|T) 
                   # Cycle themes
+                  INPUT_PENDING=true
                   case "$THEME" in
                     default) THEME=nord ;;
                     nord) THEME=gruvbox ;;
@@ -458,6 +471,81 @@
                     monokai) THEME=solarized ;;
                     *) THEME=default ;;
                   esac
+                  return 0
+                  ;;
+                e|E)
+                  # Edit config file
+                  INPUT_PENDING=true
+                  edit_config
+                  return 0
+                  ;;
+                f|F)
+                  # Toggle filter mode - clear filter
+                  INPUT_PENDING=true
+                  if [ -n "$PROCESS_FILTER" ]; then
+                    PROCESS_FILTER=""
+                  else
+                    # Enter filter mode (will be handled by next input)
+                    PROCESS_FILTER=""
+                  fi
+                  return 0
+                  ;;
+                s|S)
+                  # Cycle sort keys
+                  INPUT_PENDING=true
+                  case "$SORT_KEY" in
+                    cpu) SORT_KEY=mem ;;
+                    mem) SORT_KEY=pid ;;
+                    pid) SORT_KEY=name ;;
+                    *) SORT_KEY=cpu ;;
+                  esac
+                  return 0
+                  ;;
+                r|R)
+                  # Toggle sort direction
+                  INPUT_PENDING=true
+                  PROCESS_SORT_REVERSED=$([ "$PROCESS_SORT_REVERSED" = true ] && echo false || echo true)
+                  return 0
+                  ;;
+                $'\n'|$'\r')
+                  # Toggle process details overlay
+                  INPUT_PENDING=true
+                  SHOW_DETAILS=$([ "$SHOW_DETAILS" = true ] && echo false || echo true)
+                  return 0
+                  ;;
+                i|I)
+                  INPUT_PENDING=true
+                  SHOW_DETAILS=$([ "$SHOW_DETAILS" = true ] && echo false || echo true)
+                  return 0
+                  ;;
+                k|K)
+                  # Kill selected process
+                  INPUT_PENDING=true
+                  if [ -n "$SELECTED_PID" ]; then
+                    kill -TERM "$SELECTED_PID" 2>/dev/null || true
+                    SELECTED_PID=""
+                  fi
+                  return 0
+                  ;;
+                h|H|?)
+                  # Toggle help
+                  INPUT_PENDING=true
+                  SHOW_HELP=$([ "$SHOW_HELP" = true ] && echo false || echo true)
+                  return 0
+                  ;;
+                [0-9])
+                  # Process selection by number (if implemented)
+                  INPUT_PENDING=true
+                  return 0
+                  ;;
+                *)
+                  # If not a control key, treat as filter input
+                  # Append to filter and return
+                  INPUT_PENDING=true
+                  PROCESS_FILTER="${PROCESS_FILTER}${input}"
+                  return 0
+                  ;;
+              esac
                   return 0
                   ;;
                 e|E)
@@ -606,6 +694,7 @@
           
           # Main loop
           while [ "$RUNNING" = true ]; do
+            INPUT_PENDING=false
             # Always refresh dimensions at start of loop (catches resize events)
             # Use set +e to prevent exit on error (tput might fail in some cases)
             set +e
@@ -615,12 +704,16 @@
             
             # Check for keyboard input (non-blocking)
             check_input || true
+
+            SKIP_COLLECTION=$INPUT_PENDING
             
             # Collect static data (cached)
-            collect_static_data
-            
-            # Collect platform-specific dynamic data
-            ${if isDarwin then "collect_darwin_data" else "collect_linux_data"}
+            if [ "$SKIP_COLLECTION" = false ]; then
+              collect_static_data
+              
+              # Collect platform-specific dynamic data
+              ${if isDarwin then "collect_darwin_data" else "collect_linux_data"}
+            fi
             
             # Find flake reference - try multiple methods
             # IMPORTANT: Must check for both flake.nix AND nixmon.nix to ensure it's the right project
@@ -799,16 +892,14 @@
             # Sleep with input checking (allows responsive quit and resize)
             # If resize flag is set during sleep, break early for immediate redraw
             REFRESH_CENTIS=$(echo "$REFRESH_RATE" | awk '{printf "%.0f", $1 * 100}')
-            SLEPT=0
-            while [ "$SLEPT" -lt "$REFRESH_CENTIS" ] && [ "$RUNNING" = true ]; do
-              # Check if resize occurred during sleep
-              if [ -f "$RESIZE_FLAG" ]; then
-                break  # Break early to redraw immediately
-              fi
-              sleep 0.1
-              SLEPT=$((SLEPT + 10))
-              check_input || true
-            done
+        SLEPT=0
+        while [ "$SLEPT" -lt "$REFRESH_CENTIS" ] && [ "$RUNNING" = true ]; do
+          [ -f "$RESIZE_FLAG" ] && break
+          [ "$INPUT_PENDING" = true ] && break
+          sleep 0.1
+          SLEPT=$((SLEPT + 10))
+          check_input || true
+        done
           done
         '';
 

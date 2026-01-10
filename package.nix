@@ -120,6 +120,7 @@ in stdenv.mkDerivation rec {
     INFO_BAR_HEIGHT=1
     PROCESS_MAX_ROWS=0
     PROCESS_LIST_START=0
+    INPUT_PENDING=false
     
     # Configuration file handling
     CONFIG_DIR="''${XDG_CONFIG_HOME:-$HOME/.config}/nixmon"
@@ -379,21 +380,27 @@ in stdenv.mkDerivation rec {
       
       if [[ "$input" == *$'\e['* ]]; then
         if [[ "$input" == *$'\e[<'* ]] || [[ "$input" == *$'\e[M'* ]]; then
+          INPUT_PENDING=true
           parse_mouse_event "$input" && return 0
         fi
         if [ "$input" = $'\e[A' ]; then
+          INPUT_PENDING=true
           move_selection_up
           return 0
         elif [ "$input" = $'\e[B' ]; then
+          INPUT_PENDING=true
           move_selection_down
           return 0
         elif [ "$input" = $'\e[5~' ]; then
+          INPUT_PENDING=true
           move_selection_page up
           return 0
         elif [ "$input" = $'\e[6~' ]; then
+          INPUT_PENDING=true
           move_selection_page down
           return 0
         elif [ "$input" = $'\e' ] || [ "$input" = $'\e[' ]; then
+          INPUT_PENDING=true
           RUNNING=false
           return 0
         fi
@@ -401,18 +408,18 @@ in stdenv.mkDerivation rec {
       fi
       
       case "$input" in
-        q|Q) RUNNING=false; return 0 ;;
-        +|=) REFRESH_RATE=$(echo "$REFRESH_RATE" | awk '{new=$1-0.1; if(new<0.1) new=0.1; printf "%.1f", new}'); return 0 ;;
-        -|_) REFRESH_RATE=$(echo "$REFRESH_RATE" | awk '{new=$1+0.1; if(new>10) new=10; printf "%.1f", new}'); return 0 ;;
-        t|T) case "$THEME" in default) THEME=nord ;; nord) THEME=gruvbox ;; gruvbox) THEME=dracula ;; dracula) THEME=monokai ;; monokai) THEME=solarized ;; *) THEME=default ;; esac; return 0 ;;
-        e|E) edit_config; return 0 ;;
-        s|S) case "$SORT_KEY" in cpu) SORT_KEY=mem ;; mem) SORT_KEY=pid ;; pid) SORT_KEY=name ;; *) SORT_KEY=cpu ;; esac; return 0 ;;
-        r|R) PROCESS_SORT_REVERSED=$([ "$PROCESS_SORT_REVERSED" = true ] && echo false || echo true); return 0 ;;
-        $'\n'|$'\r') SHOW_DETAILS=$([ "$SHOW_DETAILS" = true ] && echo false || echo true); return 0 ;;
-        i|I) SHOW_DETAILS=$([ "$SHOW_DETAILS" = true ] && echo false || echo true); return 0 ;;
-        f|F) [ -n "$PROCESS_FILTER" ] && PROCESS_FILTER="" || PROCESS_FILTER=""; return 0 ;;
-        k|K) [ -n "$SELECTED_PID" ] && kill -TERM "$SELECTED_PID" 2>/dev/null || true; SELECTED_PID=""; return 0 ;;
-        h|H|?) SHOW_HELP=$([ "$SHOW_HELP" = true ] && echo false || echo true); return 0 ;;
+        q|Q) INPUT_PENDING=true; RUNNING=false; return 0 ;;
+        +|=) INPUT_PENDING=true; REFRESH_RATE=$(echo "$REFRESH_RATE" | awk '{new=$1-0.1; if(new<0.1) new=0.1; printf "%.1f", new}'); return 0 ;;
+        -|_) INPUT_PENDING=true; REFRESH_RATE=$(echo "$REFRESH_RATE" | awk '{new=$1+0.1; if(new>10) new=10; printf "%.1f", new}'); return 0 ;;
+        t|T) INPUT_PENDING=true; case "$THEME" in default) THEME=nord ;; nord) THEME=gruvbox ;; gruvbox) THEME=dracula ;; dracula) THEME=monokai ;; monokai) THEME=solarized ;; *) THEME=default ;; esac; return 0 ;;
+        e|E) INPUT_PENDING=true; edit_config; return 0 ;;
+        s|S) INPUT_PENDING=true; case "$SORT_KEY" in cpu) SORT_KEY=mem ;; mem) SORT_KEY=pid ;; pid) SORT_KEY=name ;; *) SORT_KEY=cpu ;; esac; return 0 ;;
+        r|R) INPUT_PENDING=true; PROCESS_SORT_REVERSED=$([ "$PROCESS_SORT_REVERSED" = true ] && echo false || echo true); return 0 ;;
+        $'\n'|$'\r') INPUT_PENDING=true; SHOW_DETAILS=$([ "$SHOW_DETAILS" = true ] && echo false || echo true); return 0 ;;
+        i|I) INPUT_PENDING=true; SHOW_DETAILS=$([ "$SHOW_DETAILS" = true ] && echo false || echo true); return 0 ;;
+        f|F) INPUT_PENDING=true; [ -n "$PROCESS_FILTER" ] && PROCESS_FILTER="" || PROCESS_FILTER=""; return 0 ;;
+        k|K) INPUT_PENDING=true; [ -n "$SELECTED_PID" ] && kill -TERM "$SELECTED_PID" 2>/dev/null || true; SELECTED_PID=""; return 0 ;;
+        h|H|?) INPUT_PENDING=true; SHOW_HELP=$([ "$SHOW_HELP" = true ] && echo false || echo true); return 0 ;;
       esac
       return 1
     }
@@ -462,11 +469,15 @@ in stdenv.mkDerivation rec {
     
     # Main loop
     while [ "$RUNNING" = true ]; do
+      INPUT_PENDING=false
       set +e; get_dimensions; set -e
       calculate_layout
       check_input || true
-      collect_static_data
-      ${if isDarwin then "collect_darwin_data" else "collect_linux_data"}
+      SKIP_COLLECTION=$INPUT_PENDING
+      if [ "$SKIP_COLLECTION" = false ]; then
+        collect_static_data
+        ${if isDarwin then "collect_darwin_data" else "collect_linux_data"}
+      fi
       
       ERR_FILE="/tmp/nixmon-error-$$.txt"
       OUTPUT=""
@@ -558,6 +569,7 @@ in stdenv.mkDerivation rec {
       SLEPT=0
       while [ "$SLEPT" -lt "$REFRESH_CENTIS" ] && [ "$RUNNING" = true ]; do
         [ -f "$RESIZE_FLAG" ] && break
+        [ "$INPUT_PENDING" = true ] && break
         sleep 0.1
         SLEPT=$((SLEPT + 10))
         check_input || true
