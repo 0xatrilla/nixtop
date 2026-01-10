@@ -38,7 +38,7 @@ Install globally so you can run `nixmon` from anywhere, just like `btop`:
 ./install.sh /path/to/nixmon
 
 # Or install directly from GitHub (once published)
-nix profile install github:yourusername/nixmon#nixmon
+nix profile install github:0xatrilla/nixtop#nixmon
 ```
 
 After installation, simply run:
@@ -58,7 +58,7 @@ Run directly with Nix (no installation needed):
 nix run github:yourusername/nixmon
 
 # Or from local directory
-nix run .
+nix profile install github:0xatrilla/nixtop#nixmon
 ```
 
 ### Update
