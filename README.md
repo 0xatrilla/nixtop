@@ -55,7 +55,7 @@ Run directly with Nix (no installation needed):
 
 ```bash
 # From GitHub (once published)
-nix run github:yourusername/nixmon
+nix run github:0xatrilla/nixmon
 
 # Or from local directory
 nix run .
